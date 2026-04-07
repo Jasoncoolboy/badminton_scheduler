@@ -1,5 +1,5 @@
 // ==========================================
-// BADMINTON MATCH SCHEDULER - PWA
+// BADMINTON MATCH SCHEDULER - PWA (FIXED)
 // ==========================================
 
 const App = {
@@ -16,6 +16,7 @@ const App = {
     presentPlayers: new Set(),
     shuffleCount: 0,
     maxShuffles: 5,
+    statsSnapshot: null,
 
     // ==========================================
     // INITIALIZATION
@@ -57,7 +58,6 @@ const App = {
     // EVENT BINDING
     // ==========================================
     bindEvents() {
-        // Setup screen
         document.getElementById('add-player-btn').addEventListener('click', () => this.addPlayer());
         document.getElementById('player-name-input').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') this.addPlayer();
@@ -68,17 +68,11 @@ const App = {
         });
 
         document.getElementById('start-session-btn').addEventListener('click', () => this.startSession());
-
-        // Attendance screen
         document.getElementById('generate-round-btn').addEventListener('click', () => this.generateRound());
         document.getElementById('back-to-setup-btn').addEventListener('click', () => this.showScreen('screen-setup'));
-
-        // Round screen
         document.getElementById('next-round-btn').addEventListener('click', () => this.nextRound());
         document.getElementById('shuffle-round-btn').addEventListener('click', () => this.shuffleRound());
         document.getElementById('end-session-btn').addEventListener('click', () => this.endSession());
-
-        // Summary screen
         document.getElementById('new-session-btn').addEventListener('click', () => this.newSession());
     },
 
@@ -97,7 +91,7 @@ const App = {
     addPlayer() {
         const input = document.getElementById('player-name-input');
         const name = input.value.trim();
-        
+
         if (!name) return;
         if (this.sessionPlayers.find(p => p.toLowerCase() === name.toLowerCase())) {
             this.showToast('Player already added!');
@@ -147,11 +141,11 @@ const App = {
     renderSavedPlayers() {
         const container = document.getElementById('saved-player-list');
         const sessionLower = this.sessionPlayers.map(p => p.toLowerCase());
-        
+
         container.innerHTML = this.savedPlayers.map(name => {
             const added = sessionLower.includes(name.toLowerCase());
             return `
-                <span class="saved-player-tag ${added ? 'added' : ''}" 
+                <span class="saved-player-tag ${added ? 'added' : ''}"
                       onclick="App.addSavedPlayer('${name}')">
                     ${name}
                     <span class="delete-saved" onclick="App.deleteSavedPlayer('${name}', event)">&times;</span>
@@ -186,8 +180,7 @@ const App = {
     // ==========================================
     startSession() {
         this.savePlayers();
-        
-        // Initialize stats
+
         this.playerStats = {};
         this.sessionPlayers.forEach(name => {
             this.playerStats[name] = {
@@ -199,7 +192,6 @@ const App = {
             };
         });
 
-        // Initialize pairing history
         this.pairingHistory = {};
         this.opponentHistory = {};
         this.sessionPlayers.forEach(p1 => {
@@ -216,8 +208,7 @@ const App = {
         this.rounds = [];
         this.currentRound = 0;
         this.restRequests.clear();
-
-        // All players present initially
+        this.statsSnapshot = null;
         this.presentPlayers = new Set(this.sessionPlayers);
 
         this.renderAttendance();
@@ -232,7 +223,7 @@ const App = {
         container.innerHTML = this.sessionPlayers.map(name => {
             const isPresent = this.presentPlayers.has(name);
             return `
-                <div class="attendance-item ${isPresent ? 'present' : 'absent'}" 
+                <div class="attendance-item ${isPresent ? 'present' : 'absent'}"
                      onclick="App.toggleAttendance('${name}')">
                     <span>${name}</span>
                     <span class="attendance-status">${isPresent ? '✅' : '❌'}</span>
@@ -249,16 +240,116 @@ const App = {
             this.presentPlayers.delete(name);
         } else {
             this.presentPlayers.add(name);
+            // Initialize stats for newly joined player if needed
+            if (!this.playerStats[name]) {
+                this.playerStats[name] = {
+                    gamesPlayed: 0,
+                    restCount: 0,
+                    consecutivePlayed: 0,
+                    partners: [],
+                    opponents: []
+                };
+            }
+            // Ensure pairing/opponent history exists
+            if (!this.pairingHistory[name]) {
+                this.pairingHistory[name] = {};
+                this.opponentHistory[name] = {};
+            }
+            this.sessionPlayers.forEach(p => {
+                if (p !== name) {
+                    if (this.pairingHistory[name][p] === undefined) this.pairingHistory[name][p] = 0;
+                    if (this.pairingHistory[p] && this.pairingHistory[p][name] === undefined) this.pairingHistory[p][name] = 0;
+                    if (this.opponentHistory[name][p] === undefined) this.opponentHistory[name][p] = 0;
+                    if (this.opponentHistory[p] && this.opponentHistory[p][name] === undefined) this.opponentHistory[p][name] = 0;
+                }
+            });
         }
         this.renderAttendance();
     },
 
     // ==========================================
-    // ROUND GENERATION
+    // SNAPSHOT (for shuffle undo)
+    // ==========================================
+    saveStatsSnapshot() {
+        this.statsSnapshot = JSON.parse(JSON.stringify({
+            playerStats: this.playerStats,
+            pairingHistory: this.pairingHistory,
+            opponentHistory: this.opponentHistory
+        }));
+    },
+
+    restoreStatsSnapshot() {
+        if (this.statsSnapshot) {
+            this.playerStats = JSON.parse(JSON.stringify(this.statsSnapshot.playerStats));
+            this.pairingHistory = JSON.parse(JSON.stringify(this.statsSnapshot.pairingHistory));
+            this.opponentHistory = JSON.parse(JSON.stringify(this.statsSnapshot.opponentHistory));
+        }
+    },
+
+    // ==========================================
+    // 🔑 FAIR REST SELECTION (FIXED)
+    // ==========================================
+    selectRestingPlayers(available, restCount) {
+        if (restCount <= 0) return [];
+
+        // Separate manual rest requests
+        let requested = available.filter(p => this.restRequests.has(p));
+        let remaining = available.filter(p => !this.restRequests.has(p));
+
+        let slotsLeft = restCount - requested.length;
+
+        // If too many requested rest, only take what we need
+        if (slotsLeft <= 0) return requested.slice(0, restCount);
+
+        // Score remaining players for rest priority
+        let scored = remaining.map(name => {
+            const s = this.playerStats[name] || {
+                gamesPlayed: 0, restCount: 0, consecutivePlayed: 0
+            };
+            return {
+                name,
+                gamesPlayed: s.gamesPlayed,
+                restCount: s.restCount,
+                consecutivePlayed: s.consecutivePlayed,
+                // KEY METRIC: how "overdue" for rest
+                // Higher = played more relative to resting = should rest
+                restPriority: s.gamesPlayed - s.restCount,
+                random: Math.random()  // ← FIX #2: randomize ties
+            };
+        });
+
+        // Sort: top of list = should rest first
+        scored.sort((a, b) => {
+            // ← FIX #1: New/returning players go to BOTTOM (they PLAY)
+            if (a.gamesPlayed === 0 && b.gamesPlayed > 0) return 1;
+            if (b.gamesPlayed === 0 && a.gamesPlayed > 0) return -1;
+
+            // Most overdue for rest → top
+            if (a.restPriority !== b.restPriority)
+                return b.restPriority - a.restPriority;
+
+            // Most consecutive games → top
+            if (a.consecutivePlayed !== b.consecutivePlayed)
+                return b.consecutivePlayed - a.consecutivePlayed;
+
+            // ← FIX #2: Random tiebreak prevents same group always resting
+            return a.random - b.random;
+        });
+
+        let autoRest = scored.slice(0, slotsLeft).map(s => s.name);
+        return [...requested, ...autoRest];
+    },
+
+    // ==========================================
+    // ROUND GENERATION (FIXED)
     // ==========================================
     generateRound() {
         this.shuffleCount = 0;
         this.currentRound++;
+
+        // Save snapshot before this round for shuffle undo
+        this.saveStatsSnapshot();
+
         const round = this.createRoundSchedule();
         this.rounds.push(round);
         this.updateStats(round);
@@ -267,80 +358,44 @@ const App = {
     },
 
     createRoundSchedule() {
-        let available = [...this.presentPlayers].filter(p => !this.restRequests.has(p));
-        let requestedRest = [...this.presentPlayers].filter(p => this.restRequests.has(p));
+        // All present players
+        let allPresent = [...this.presentPlayers];
 
-        // Determine court configuration
+        // Calculate how many can play
         const courts = this.courts;
-        let doublesCount = Math.min(Math.floor(available.length / 4), courts);
-        let remainingPlayers = available.length - (doublesCount * 4);
-        let remainingCourts = courts - doublesCount;
-        let singlesCount = Math.min(Math.floor(remainingPlayers / 2), remainingCourts);
-        let totalPlaying = (doublesCount * 4) + (singlesCount * 2);
-        let restCount = available.length - totalPlaying;
-
-        // Determine who rests (fair rotation)
-        let mustRest = [...requestedRest];
-        let autoRest = [];
-
-        if (restCount > 0) {
-            // Sort by priority: most consecutive played, least rested, most games
-            let candidates = available.sort((a, b) => {
-                const sa = this.playerStats[a] || { consecutivePlayed: 0, restCount: 0, gamesPlayed: 0 };
-                const sb = this.playerStats[b] || { consecutivePlayed: 0, restCount: 0, gamesPlayed: 0 };
-
-                // Returning players (0 games) get priority to play
-                if (sa.gamesPlayed === 0 && sb.gamesPlayed > 0) return -1;
-                if (sb.gamesPlayed === 0 && sa.gamesPlayed > 0) return 1;
-
-                // Most consecutive played → should rest
-                if (sb.consecutivePlayed !== sa.consecutivePlayed)
-                    return sb.consecutivePlayed - sa.consecutivePlayed;
-
-                // Least rested → should rest
-                if (sa.restCount !== sb.restCount)
-                    return sa.restCount - sb.restCount;
-
-                // Most games played → should rest
-                return sb.gamesPlayed - sa.gamesPlayed;
-            });
-
-            autoRest = candidates.slice(0, restCount);
-        }
-
-        let allResting = [...new Set([...mustRest, ...autoRest])];
-        let playing = available.filter(p => !allResting.includes(p));
-
-        // If we have too many resting due to manual requests, recalculate
-        if (playing.length < 2) {
-            // Force some back
-            playing = available.slice(0, Math.max(2, totalPlaying));
-            allResting = available.filter(p => !playing.includes(p));
-        }
-
-        // Recalculate courts with actual playing count
-        doublesCount = Math.min(Math.floor(playing.length / 4), courts);
-        let remPlayers = playing.length - (doublesCount * 4);
+        let doublesCount = Math.min(Math.floor(allPresent.length / 4), courts);
+        let remPlayers = allPresent.length - (doublesCount * 4);
         let remCourts = courts - doublesCount;
+        let singlesCount = Math.min(Math.floor(remPlayers / 2), remCourts);
+        let totalSlots = (doublesCount * 4) + (singlesCount * 2);
+        let restCount = allPresent.length - totalSlots;
+
+        // Fair rest selection
+        let resting = this.selectRestingPlayers(allPresent, restCount);
+        let playing = allPresent.filter(p => !resting.includes(p));
+
+        // Safety check
+        if (playing.length < 2 && allPresent.length >= 2) {
+            playing = allPresent.slice(0, Math.min(allPresent.length, totalSlots || 2));
+            resting = allPresent.filter(p => !playing.includes(p));
+        }
+
+        // Recalculate court config for actual player count
+        doublesCount = Math.min(Math.floor(playing.length / 4), courts);
+        remPlayers = playing.length - (doublesCount * 4);
+        remCourts = courts - doublesCount;
         singlesCount = Math.min(Math.floor(remPlayers / 2), remCourts);
-        let extraRest = playing.length - (doublesCount * 4) - (singlesCount * 2);
-        
-        if (extraRest > 0) {
-            // Move extra to resting using same fair logic
-            let sorted = [...playing].sort((a, b) => {
-                const sa = this.playerStats[a] || { consecutivePlayed: 0, restCount: 0, gamesPlayed: 0 };
-                const sb = this.playerStats[b] || { consecutivePlayed: 0, restCount: 0, gamesPlayed: 0 };
-                if (sa.gamesPlayed === 0 && sb.gamesPlayed > 0) return -1;
-                if (sb.gamesPlayed === 0 && sa.gamesPlayed > 0) return 1;
-                if (sb.consecutivePlayed !== sa.consecutivePlayed)
-                    return sb.consecutivePlayed - sa.consecutivePlayed;
-                if (sa.restCount !== sb.restCount)
-                    return sa.restCount - sb.restCount;
-                return sb.gamesPlayed - sa.gamesPlayed;
-            });
-            let extraRestPlayers = sorted.slice(0, extraRest);
-            allResting = [...allResting, ...extraRestPlayers];
-            playing = playing.filter(p => !extraRestPlayers.includes(p));
+
+        // If still extra players, move to rest
+        let actualPlaying = (doublesCount * 4) + (singlesCount * 2);
+        if (playing.length > actualPlaying) {
+            let extraCount = playing.length - actualPlaying;
+            let extraRest = this.selectRestingPlayers(
+                playing.filter(p => !resting.includes(p)),
+                extraCount
+            );
+            resting = [...resting, ...extraRest];
+            playing = playing.filter(p => !resting.includes(p));
         }
 
         // Generate matches
@@ -348,21 +403,27 @@ const App = {
 
         return {
             roundNumber: this.currentRound,
-            matches: matches,
-            resting: allResting,
-            playing: playing
+            matches,
+            resting,
+            playing
         };
     },
 
+    // ==========================================
+    // MATCH CREATION
+    // ==========================================
     createMatches(players, doublesCount, singlesCount) {
         const matches = [];
         let assigned = new Set();
 
-        // Create doubles matches
+        // Shuffle players slightly to avoid order bias
+        let shuffledPlayers = [...players].sort(() => Math.random() - 0.5);
+
+        // Doubles
         for (let i = 0; i < doublesCount; i++) {
-            const available = players.filter(p => !assigned.has(p));
+            const available = shuffledPlayers.filter(p => !assigned.has(p));
             const teams = this.formDoublesTeams(available);
-            
+
             if (teams) {
                 matches.push({
                     court: matches.length + 1,
@@ -375,9 +436,9 @@ const App = {
             }
         }
 
-        // Create singles matches
+        // Singles
         for (let i = 0; i < singlesCount; i++) {
-            const available = players.filter(p => !assigned.has(p));
+            const available = shuffledPlayers.filter(p => !assigned.has(p));
             if (available.length >= 2) {
                 const pair = this.formSinglesMatch(available);
                 matches.push({
@@ -397,21 +458,18 @@ const App = {
     formDoublesTeams(available) {
         if (available.length < 4) return null;
 
-        // Generate all possible pairs and score them
         let pairs = [];
         for (let i = 0; i < available.length; i++) {
             for (let j = i + 1; j < available.length; j++) {
                 const p1 = available[i];
                 const p2 = available[j];
                 const score = (this.pairingHistory[p1] && this.pairingHistory[p1][p2]) || 0;
-                pairs.push({ players: [p1, p2], score: score });
+                pairs.push({ players: [p1, p2], score });
             }
         }
 
-        // Sort by score (least paired first)
         pairs.sort((a, b) => a.score - b.score);
 
-        // Try to find two non-overlapping pairs with lowest combined score
         let bestTeams = null;
         let bestScore = Infinity;
 
@@ -420,17 +478,17 @@ const App = {
                 const p1 = pairs[i].players;
                 const p2 = pairs[j].players;
 
-                // Check no overlap
-                if (p1[0] !== p2[0] && p1[0] !== p2[1] && p1[1] !== p2[0] && p1[1] !== p2[1]) {
+                if (p1[0] !== p2[0] && p1[0] !== p2[1] &&
+                    p1[1] !== p2[0] && p1[1] !== p2[1]) {
+
                     const combinedScore = pairs[i].score + pairs[j].score;
-                    
-                    // Also consider opponent history
                     const oppScore = this.getOpponentScore(p1, p2);
-                    const totalScore = combinedScore * 2 + oppScore;
+                    // Add small random factor for variety among equal scores
+                    const totalScore = combinedScore * 2 + oppScore + Math.random() * 0.5;
 
                     if (totalScore < bestScore) {
                         bestScore = totalScore;
-                        bestTeams = { team1: p1, team2: p2 };
+                        bestTeams = { team1: [...p1], team2: [...p2] };
                     }
                 }
             }
@@ -450,14 +508,17 @@ const App = {
     },
 
     formSinglesMatch(available) {
-        if (available.length < 2) return null;
+        if (available.length < 2) return available;
 
         let bestPair = [available[0], available[1]];
         let bestScore = Infinity;
 
         for (let i = 0; i < available.length; i++) {
             for (let j = i + 1; j < available.length; j++) {
-                const score = (this.opponentHistory[available[i]] && this.opponentHistory[available[i]][available[j]]) || 0;
+                const score = ((this.opponentHistory[available[i]] &&
+                    this.opponentHistory[available[i]][available[j]]) || 0)
+                    + Math.random() * 0.5;
+
                 if (score < bestScore) {
                     bestScore = score;
                     bestPair = [available[i], available[j]];
@@ -469,10 +530,10 @@ const App = {
     },
 
     // ==========================================
-    // STATS UPDATE
+    // STATS UPDATE (FIXED)
     // ==========================================
     updateStats(round) {
-        // Update playing stats
+        // Playing players
         round.playing.forEach(name => {
             if (!this.playerStats[name]) {
                 this.playerStats[name] = {
@@ -484,7 +545,7 @@ const App = {
             this.playerStats[name].consecutivePlayed++;
         });
 
-        // Update resting stats
+        // Resting players
         round.resting.forEach(name => {
             if (!this.playerStats[name]) {
                 this.playerStats[name] = {
@@ -496,41 +557,48 @@ const App = {
             this.playerStats[name].consecutivePlayed = 0;
         });
 
-        // Update pairing and opponent history
+        // Absent players also reset consecutive
+        this.sessionPlayers.forEach(name => {
+            if (!this.presentPlayers.has(name) && this.playerStats[name]) {
+                this.playerStats[name].consecutivePlayed = 0;
+            }
+        });
+
+        // Pairing & opponent history
         round.matches.forEach(match => {
-            // Partners (doubles only)
             if (match.type === 'doubles') {
                 const t1 = match.team1;
                 const t2 = match.team2;
 
-                // Team 1 partners
-                if (this.pairingHistory[t1[0]]) this.pairingHistory[t1[0]][t1[1]] = (this.pairingHistory[t1[0]][t1[1]] || 0) + 1;
-                if (this.pairingHistory[t1[1]]) this.pairingHistory[t1[1]][t1[0]] = (this.pairingHistory[t1[1]][t1[0]] || 0) + 1;
-
-                // Team 2 partners
-                if (this.pairingHistory[t2[0]]) this.pairingHistory[t2[0]][t2[1]] = (this.pairingHistory[t2[0]][t2[1]] || 0) + 1;
-                if (this.pairingHistory[t2[1]]) this.pairingHistory[t2[1]][t2[0]] = (this.pairingHistory[t2[1]][t2[0]] || 0) + 1;
-
-                // Partners list
-                if (this.playerStats[t1[0]]) this.playerStats[t1[0]].partners.push(t1[1]);
-                if (this.playerStats[t1[1]]) this.playerStats[t1[1]].partners.push(t1[0]);
-                if (this.playerStats[t2[0]]) this.playerStats[t2[0]].partners.push(t2[1]);
-                if (this.playerStats[t2[1]]) this.playerStats[t2[1]].partners.push(t2[0]);
+                // Partners
+                this.recordPartnership(t1[0], t1[1]);
+                this.recordPartnership(t2[0], t2[1]);
             }
 
             // Opponents
             match.team1.forEach(p1 => {
                 match.team2.forEach(p2 => {
-                    if (this.opponentHistory[p1]) this.opponentHistory[p1][p2] = (this.opponentHistory[p1][p2] || 0) + 1;
-                    if (this.opponentHistory[p2]) this.opponentHistory[p2][p1] = (this.opponentHistory[p2][p1] || 0) + 1;
-                    if (this.playerStats[p1]) this.playerStats[p1].opponents.push(p2);
-                    if (this.playerStats[p2]) this.playerStats[p2].opponents.push(p1);
+                    this.recordOpponent(p1, p2);
                 });
             });
         });
 
-        // Clear rest requests after round
+        // Clear rest requests (they're one-round only)
         this.restRequests.clear();
+    },
+
+    recordPartnership(p1, p2) {
+        if (this.pairingHistory[p1]) this.pairingHistory[p1][p2] = (this.pairingHistory[p1][p2] || 0) + 1;
+        if (this.pairingHistory[p2]) this.pairingHistory[p2][p1] = (this.pairingHistory[p2][p1] || 0) + 1;
+        if (this.playerStats[p1]) this.playerStats[p1].partners.push(p2);
+        if (this.playerStats[p2]) this.playerStats[p2].partners.push(p1);
+    },
+
+    recordOpponent(p1, p2) {
+        if (this.opponentHistory[p1]) this.opponentHistory[p1][p2] = (this.opponentHistory[p1][p2] || 0) + 1;
+        if (this.opponentHistory[p2]) this.opponentHistory[p2][p1] = (this.opponentHistory[p2][p1] || 0) + 1;
+        if (this.playerStats[p1]) this.playerStats[p1].opponents.push(p2);
+        if (this.playerStats[p2]) this.playerStats[p2].opponents.push(p1);
     },
 
     // ==========================================
@@ -539,7 +607,6 @@ const App = {
     renderRound(round) {
         document.getElementById('round-number').textContent = round.roundNumber;
 
-        // Matches
         const matchesContainer = document.getElementById('matches-container');
         matchesContainer.innerHTML = round.matches.map(match => `
             <div class="match-card ${match.type}">
@@ -562,29 +629,29 @@ const App = {
         // Resting
         const restingContainer = document.getElementById('resting-container');
         const restingList = document.getElementById('resting-list');
-        
+
         if (round.resting.length > 0) {
             restingContainer.classList.remove('hidden');
-            restingList.innerHTML = round.resting.map(name => 
-                `<span class="resting-tag">${name}</span>`
-            ).join('');
+            restingList.innerHTML = round.resting.map(name => {
+                const stats = this.playerStats[name];
+                return `<span class="resting-tag">${name} (R:${stats ? stats.restCount : 0})</span>`;
+            }).join('');
         } else {
             restingContainer.classList.add('hidden');
         }
 
-        // Rest requests for next round
-        const allPlaying = [...round.playing, ...round.resting].filter(p => this.presentPlayers.has(p));
+        // Rest requests
+        const allInRound = [...round.playing, ...round.resting].filter(p => this.presentPlayers.has(p));
         const restRequestList = document.getElementById('rest-request-list');
-        restRequestList.innerHTML = allPlaying.map(name => `
+        restRequestList.innerHTML = allInRound.map(name => `
             <div class="rest-request-item">
-                <span>${name}</span>
-                <button class="rest-toggle ${this.restRequests.has(name) ? 'active' : ''}" 
+                <span>${name} <small style="color:var(--text-dim)">(P:${this.playerStats[name]?.gamesPlayed || 0} R:${this.playerStats[name]?.restCount || 0})</small></span>
+                <button class="rest-toggle ${this.restRequests.has(name) ? 'active' : ''}"
                         onclick="App.toggleRestRequest('${name}', this)">
                 </button>
             </div>
         `).join('');
 
-        // Reset shuffle count
         this.shuffleCount = 0;
     },
 
@@ -612,50 +679,18 @@ const App = {
             return;
         }
 
-        // Undo last round stats
-        const lastRound = this.rounds[this.rounds.length - 1];
-        this.undoStats(lastRound);
+        // Restore to pre-round state
+        this.restoreStatsSnapshot();
 
-        // Regenerate
         this.shuffleCount++;
         const round = this.createRoundSchedule();
         this.rounds[this.rounds.length - 1] = round;
+
+        // Save new snapshot and apply
+        this.saveStatsSnapshot();
         this.updateStats(round);
         this.renderRound(round);
         this.showToast(`Shuffled! (${this.shuffleCount}/${this.maxShuffles})`);
-    },
-
-    undoStats(round) {
-        round.playing.forEach(name => {
-            if (this.playerStats[name]) {
-                this.playerStats[name].gamesPlayed--;
-                this.playerStats[name].consecutivePlayed--;
-            }
-        });
-
-        round.resting.forEach(name => {
-            if (this.playerStats[name]) {
-                this.playerStats[name].restCount--;
-            }
-        });
-
-        round.matches.forEach(match => {
-            if (match.type === 'doubles') {
-                const t1 = match.team1;
-                const t2 = match.team2;
-                if (this.pairingHistory[t1[0]]) this.pairingHistory[t1[0]][t1[1]]--;
-                if (this.pairingHistory[t1[1]]) this.pairingHistory[t1[1]][t1[0]]--;
-                if (this.pairingHistory[t2[0]]) this.pairingHistory[t2[0]][t2[1]]--;
-                if (this.pairingHistory[t2[1]]) this.pairingHistory[t2[1]][t2[0]]--;
-            }
-
-            match.team1.forEach(p1 => {
-                match.team2.forEach(p2 => {
-                    if (this.opponentHistory[p1]) this.opponentHistory[p1][p2]--;
-                    if (this.opponentHistory[p2]) this.opponentHistory[p2][p1]--;
-                });
-            });
-        });
     },
 
     // ==========================================
@@ -665,8 +700,7 @@ const App = {
         if (!confirm('End this session?')) return;
 
         const summaryContent = document.getElementById('summary-content');
-        
-        // Stats overview
+
         let html = `
             <div class="summary-stat">
                 <span class="label">Total Rounds</span>
@@ -678,11 +712,12 @@ const App = {
             </div>
             <div class="summary-stat">
                 <span class="label">Total Players</span>
-                <span class="value">${Object.keys(this.playerStats).length}</span>
+                <span class="value">${Object.keys(this.playerStats).filter(n => 
+                    this.playerStats[n].gamesPlayed > 0 || this.playerStats[n].restCount > 0
+                ).length}</span>
             </div>
         `;
 
-        // Player table
         html += `
             <table class="summary-table">
                 <thead>
@@ -690,13 +725,14 @@ const App = {
                         <th>Player</th>
                         <th>Played</th>
                         <th>Rested</th>
-                        <th>Unique Partners</th>
+                        <th>Partners</th>
                     </tr>
                 </thead>
                 <tbody>
         `;
 
         const sortedPlayers = Object.entries(this.playerStats)
+            .filter(([_, s]) => s.gamesPlayed > 0 || s.restCount > 0)
             .sort((a, b) => b[1].gamesPlayed - a[1].gamesPlayed);
 
         sortedPlayers.forEach(([name, stats]) => {
@@ -729,8 +765,8 @@ const App = {
         this.playerStats = {};
         this.restRequests.clear();
         this.presentPlayers.clear();
+        this.statsSnapshot = null;
 
-        // Reset UI
         document.getElementById('player-list').innerHTML = '';
         document.querySelectorAll('.btn-court').forEach(b => b.classList.remove('selected'));
         document.querySelector('#courts-display strong').textContent = '0';
@@ -742,7 +778,7 @@ const App = {
     },
 
     // ==========================================
-    // TOAST NOTIFICATION
+    // TOAST
     // ==========================================
     showToast(message) {
         const existing = document.querySelector('.toast');
@@ -770,5 +806,4 @@ const App = {
     }
 };
 
-// Initialize app
 document.addEventListener('DOMContentLoaded', () => App.init());
