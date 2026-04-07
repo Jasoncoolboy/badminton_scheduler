@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Shuttle">
+    <meta name="theme-color" content="#1a1a2e">
+    <title>Badminton Scheduler</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="icons/icon-192.png">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- SCREEN 1: SETUP -->
+        <div id="screen-setup" class="screen active">
+            <h1>🏸 Shuttle Scheduler</h1>
+            
+            <div class="card">
+                <h2>Players</h2>
+                <div class="input-group">
+                    <input type="text" id="player-name-input" placeholder="Enter player name" autocomplete="off">
+                    <button id="add-player-btn" class="btn btn-primary">Add</button>
+                </div>
+                <div id="player-list" class="player-list"></div>
+                
+                <div class="saved-players-section">
+                    <h3>Saved Players</h3>
+                    <div id="saved-player-list" class="saved-player-list"></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Courts</h2>
+                <div class="court-selector">
+                    <button class="btn btn-court" data-courts="1">1</button>
+                    <button class="btn btn-court" data-courts="2">2</button>
+                    <button class="btn btn-court" data-courts="3">3</button>
+                    <button class="btn btn-court" data-courts="4">4</button>
+                    <button class="btn btn-court" data-courts="5">5</button>
+                </div>
+                <p id="courts-display">Courts selected: <strong>0</strong></p>
+            </div>
+
+            <button id="start-session-btn" class="btn btn-large btn-success" disabled>
+                Start Session
+            </button>
+        </div>
+
+        <!-- SCREEN 2: ATTENDANCE -->
+        <div id="screen-attendance" class="screen">
+            <h1>🏸 Who's Playing?</h1>
+            <p class="subtitle">Tap to toggle availability</p>
+            
+            <div id="attendance-list" class="attendance-list"></div>
+            
+            <div class="bottom-actions">
+                <button id="generate-round-btn" class="btn btn-large btn-success">
+                    Generate Round
+                </button>
+                <button id="back-to-setup-btn" class="btn btn-text">← Back to Setup</button>
+            </div>
+        </div>
+
+        <!-- SCREEN 3: ROUND DISPLAY -->
+        <div id="screen-round" class="screen">
+            <div class="round-header">
+                <h1>🏸 Round <span id="round-number">1</span></h1>
+            </div>
+
+            <div id="matches-container" class="matches-container"></div>
+
+            <div id="resting-container" class="resting-container">
+                <h3>😴 Resting</h3>
+                <div id="resting-list"></div>
+            </div>
+
+            <div class="rest-request-section">
+                <h3>Request Rest for Next Round</h3>
+                <div id="rest-request-list"></div>
+            </div>
+
+            <div class="bottom-actions">
+                <button id="next-round-btn" class="btn btn-large btn-primary">
+                    Next Round →
+                </button>
+                <button id="shuffle-round-btn" class="btn btn-secondary">
+                    🔀 Shuffle
+                </button>
+                <button id="end-session-btn" class="btn btn-danger">
+                    End Session
+                </button>
+            </div>
+        </div>
+
+        <!-- SCREEN 4: SUMMARY -->
+        <div id="screen-summary" class="screen">
+            <h1>🏸 Session Summary</h1>
+            <div id="summary-content" class="summary-content"></div>
+            <button id="new-session-btn" class="btn btn-large btn-primary">
+                New Session
+            </button>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
