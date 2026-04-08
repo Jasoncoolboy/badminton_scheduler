@@ -17,7 +17,7 @@
         <!-- SCREEN 1: SETUP -->
         <div id="screen-setup" class="screen active">
             <h1>🏸 Shuttle Scheduler</h1>
-            
+
             <div class="card">
                 <h2>Players</h2>
                 <div class="input-group">
@@ -25,7 +25,7 @@
                     <button id="add-player-btn" class="btn btn-primary">Add</button>
                 </div>
                 <div id="player-list" class="player-list"></div>
-                
+
                 <div class="saved-players-section">
                     <h3>Saved Players</h3>
                     <div id="saved-player-list" class="saved-player-list"></div>
@@ -53,9 +53,20 @@
         <div id="screen-attendance" class="screen">
             <h1>🏸 Who's Playing?</h1>
             <p class="subtitle">Tap to toggle availability</p>
-            
+
+            <!-- ADD NEW PLAYER MID-SESSION -->
+            <div class="card add-player-card">
+                <h3>➕ Add New Player</h3>
+                <div class="input-group">
+                    <input type="text" id="new-player-input" placeholder="New player name" autocomplete="off">
+                    <button id="add-new-player-btn" class="btn btn-primary">Add</button>
+                </div>
+            </div>
+
             <div id="attendance-list" class="attendance-list"></div>
-            
+
+            <div id="attendance-summary" class="attendance-summary"></div>
+
             <div class="bottom-actions">
                 <button id="generate-round-btn" class="btn btn-large btn-success">
                     Generate Round
@@ -72,7 +83,7 @@
 
             <div id="matches-container" class="matches-container"></div>
 
-            <div id="resting-container" class="resting-container">
+            <div id="resting-container" class="resting-container hidden">
                 <h3>😴 Resting</h3>
                 <div id="resting-list"></div>
             </div>
@@ -85,9 +96,6 @@
             <div class="bottom-actions">
                 <button id="next-round-btn" class="btn btn-large btn-primary">
                     Next Round →
-                </button>
-                <button id="shuffle-round-btn" class="btn btn-secondary">
-                    🔀 Shuffle
                 </button>
                 <button id="end-session-btn" class="btn btn-danger">
                     End Session
