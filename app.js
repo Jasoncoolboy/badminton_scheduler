@@ -13,6 +13,8 @@ const App = {
     playerStats: {},
     restRequests: new Set(),
     presentPlayers: new Set(),
+    swRegistration: null,
+    hasPendingRefresh: false,
 
     // ==========================================
     // INIT
@@ -27,8 +29,35 @@ const App = {
     registerSW() {
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('sw.js')
-                .then(() => console.log('SW registered'))
+                .then(registration => {
+                    this.swRegistration = registration;
+                    console.log('SW registered');
+
+                    if (registration.waiting) {
+                        this.showUpdatePrompt(registration.waiting);
+                    }
+
+                    registration.addEventListener('updatefound', () => {
+                        const newWorker = registration.installing;
+                        if (!newWorker) return;
+
+                        newWorker.addEventListener('statechange', () => {
+                            if (
+                                newWorker.state === 'installed' &&
+                                navigator.serviceWorker.controller
+                            ) {
+                                this.showUpdatePrompt(newWorker);
+                            }
+                        });
+                    });
+                })
                 .catch(err => console.log('SW failed:', err));
+
+            navigator.serviceWorker.addEventListener('controllerchange', () => {
+                if (this.hasPendingRefresh) return;
+                this.hasPendingRefresh = true;
+                window.location.reload();
+            });
         }
     },
 
@@ -80,6 +109,33 @@ const App = {
 
         // Summary
         document.getElementById('new-session-btn').addEventListener('click', () => this.newSession());
+
+        document.getElementById('player-list').addEventListener('click', (event) => {
+            const removeBtn = event.target.closest('.remove-player');
+            if (!removeBtn) return;
+            this.removePlayer(removeBtn.dataset.name || '');
+        });
+
+        document.getElementById('saved-player-list').addEventListener('click', (event) => {
+            const deleteBtn = event.target.closest('.delete-saved');
+            if (deleteBtn) {
+                this.deleteSavedPlayer(deleteBtn.dataset.name || '');
+                return;
+            }
+
+            const tag = event.target.closest('.saved-player-tag');
+            if (tag) this.addSavedPlayer(tag.dataset.name || '');
+        });
+
+        document.getElementById('attendance-list').addEventListener('click', (event) => {
+            const row = event.target.closest('.attendance-item');
+            if (row) this.toggleAttendance(row.dataset.name || '');
+        });
+
+        document.getElementById('rest-request-list').addEventListener('click', (event) => {
+            const toggleBtn = event.target.closest('.rest-toggle');
+            if (toggleBtn) this.toggleRestRequest(toggleBtn.dataset.name || '', toggleBtn);
+        });
     },
 
     // ==========================================
@@ -127,8 +183,7 @@ const App = {
         this.validateSetup();
     },
 
-    deleteSavedPlayer(name, event) {
-        event.stopPropagation();
+    deleteSavedPlayer(name) {
         this.savedPlayers = this.savedPlayers.filter(p => p !== name);
         localStorage.setItem('badminton_saved_players', JSON.stringify(this.savedPlayers));
         this.renderSavedPlayers();
@@ -136,28 +191,49 @@ const App = {
 
     renderPlayerList() {
         const container = document.getElementById('player-list');
-        container.innerHTML = this.sessionPlayers.map(name => `
-            <span class="player-tag">
-                ${name}
-                <span class="remove-player" onclick="App.removePlayer('${name}')">&times;</span>
-            </span>
-        `).join('');
+        container.innerHTML = '';
+
+        this.sessionPlayers.forEach(name => {
+            const tag = document.createElement('span');
+            tag.className = 'player-tag';
+
+            const label = document.createElement('span');
+            label.textContent = name;
+            tag.appendChild(label);
+
+            const removeBtn = document.createElement('span');
+            removeBtn.className = 'remove-player';
+            removeBtn.dataset.name = name;
+            removeBtn.textContent = '\u00D7';
+            tag.appendChild(removeBtn);
+
+            container.appendChild(tag);
+        });
     },
 
     renderSavedPlayers() {
         const container = document.getElementById('saved-player-list');
         const sessionLower = this.sessionPlayers.map(p => p.toLowerCase());
+        container.innerHTML = '';
 
-        container.innerHTML = this.savedPlayers.map(name => {
+        this.savedPlayers.forEach(name => {
             const added = sessionLower.includes(name.toLowerCase());
-            return `
-                <span class="saved-player-tag ${added ? 'added' : ''}"
-                      onclick="App.addSavedPlayer('${name}')">
-                    ${name}
-                    <span class="delete-saved" onclick="App.deleteSavedPlayer('${name}', event)">&times;</span>
-                </span>
-            `;
-        }).join('');
+            const tag = document.createElement('span');
+            tag.className = `saved-player-tag ${added ? 'added' : ''}`.trim();
+            tag.dataset.name = name;
+
+            const label = document.createElement('span');
+            label.textContent = name;
+            tag.appendChild(label);
+
+            const deleteBtn = document.createElement('span');
+            deleteBtn.className = 'delete-saved';
+            deleteBtn.dataset.name = name;
+            deleteBtn.textContent = '\u00D7';
+            tag.appendChild(deleteBtn);
+
+            container.appendChild(tag);
+        });
 
         if (this.savedPlayers.length === 0) {
             container.innerHTML = '<span style="color:var(--text-dim);font-size:13px;">No saved players yet</span>';
@@ -284,27 +360,45 @@ const App = {
     // ==========================================
     renderAttendance() {
         const container = document.getElementById('attendance-list');
-        container.innerHTML = this.sessionPlayers.map(name => {
+        container.innerHTML = '';
+
+        this.sessionPlayers.forEach(name => {
             const isPresent = this.presentPlayers.has(name);
             const stats = this.playerStats[name];
             const isNew = stats && stats.gamesPlayed === 0 && stats.joinedAtRound > 0;
+            const row = document.createElement('div');
+            row.className = `attendance-item ${isPresent ? 'present' : 'absent'}`;
+            row.dataset.name = name;
 
-            return `
-                <div class="attendance-item ${isPresent ? 'present' : 'absent'}"
-                     onclick="App.toggleAttendance('${name}')">
-                    <div class="player-info">
-                        <span>
-                            ${name}
-                            ${isNew ? '<span class="new-badge">NEW</span>' : ''}
-                        </span>
-                        <span class="player-stats-line">
-                            Played: ${stats?.gamesPlayed || 0} | Rested: ${stats?.restCount || 0}
-                        </span>
-                    </div>
-                    <span class="attendance-status">${isPresent ? '✅' : '❌'}</span>
-                </div>
-            `;
-        }).join('');
+            const info = document.createElement('div');
+            info.className = 'player-info';
+
+            const topLine = document.createElement('span');
+            topLine.textContent = name;
+
+            if (isNew) {
+                const badge = document.createElement('span');
+                badge.className = 'new-badge';
+                badge.textContent = 'NEW';
+                topLine.appendChild(document.createTextNode(' '));
+                topLine.appendChild(badge);
+            }
+
+            const statsLine = document.createElement('span');
+            statsLine.className = 'player-stats-line';
+            statsLine.textContent = `Played: ${stats?.gamesPlayed || 0} | Rested: ${stats?.restCount || 0}`;
+
+            info.appendChild(topLine);
+            info.appendChild(statsLine);
+
+            const status = document.createElement('span');
+            status.className = 'attendance-status';
+            status.textContent = isPresent ? '✅' : '❌';
+
+            row.appendChild(info);
+            row.appendChild(status);
+            container.appendChild(row);
+        });
 
         // Summary
         const presentCount = [...this.presentPlayers].length;
@@ -618,33 +712,68 @@ const App = {
 
         // Matches
         const mc = document.getElementById('matches-container');
-        mc.innerHTML = round.matches.map(match => `
-            <div class="match-card ${match.type}">
-                <div class="court-label">
-                    <span>Court ${match.court}</span>
-                    <span class="match-type">${match.type.toUpperCase()}</span>
-                </div>
-                <div class="vs-container">
-                    <div class="team">
-                        ${match.team1.map(p => `<span class="player-name">${p}</span>`).join('')}
-                    </div>
-                    <span class="vs">VS</span>
-                    <div class="team">
-                        ${match.team2.map(p => `<span class="player-name">${p}</span>`).join('')}
-                    </div>
-                </div>
-            </div>
-        `).join('');
+        mc.innerHTML = '';
+        round.matches.forEach(match => {
+            const card = document.createElement('div');
+            card.className = `match-card ${match.type}`;
+
+            const label = document.createElement('div');
+            label.className = 'court-label';
+
+            const court = document.createElement('span');
+            court.textContent = `Court ${match.court}`;
+            const type = document.createElement('span');
+            type.className = 'match-type';
+            type.textContent = match.type.toUpperCase();
+            label.appendChild(court);
+            label.appendChild(type);
+
+            const vsWrap = document.createElement('div');
+            vsWrap.className = 'vs-container';
+
+            const team1 = document.createElement('div');
+            team1.className = 'team';
+            match.team1.forEach(player => {
+                const p = document.createElement('span');
+                p.className = 'player-name';
+                p.textContent = player;
+                team1.appendChild(p);
+            });
+
+            const vs = document.createElement('span');
+            vs.className = 'vs';
+            vs.textContent = 'VS';
+
+            const team2 = document.createElement('div');
+            team2.className = 'team';
+            match.team2.forEach(player => {
+                const p = document.createElement('span');
+                p.className = 'player-name';
+                p.textContent = player;
+                team2.appendChild(p);
+            });
+
+            vsWrap.appendChild(team1);
+            vsWrap.appendChild(vs);
+            vsWrap.appendChild(team2);
+            card.appendChild(label);
+            card.appendChild(vsWrap);
+            mc.appendChild(card);
+        });
 
         // Resting
         const rc = document.getElementById('resting-container');
         const rl = document.getElementById('resting-list');
         if (round.resting.length > 0) {
             rc.classList.remove('hidden');
-            rl.innerHTML = round.resting.map(name => {
+            rl.innerHTML = '';
+            round.resting.forEach(name => {
                 const s = this.playerStats[name];
-                return `<span class="resting-tag">${name} (P:${s?.gamesPlayed || 0} R:${s?.restCount || 0})</span>`;
-            }).join('');
+                const tag = document.createElement('span');
+                tag.className = 'resting-tag';
+                tag.textContent = `${name} (P:${s?.gamesPlayed || 0} R:${s?.restCount || 0})`;
+                rl.appendChild(tag);
+            });
         } else {
             rc.classList.add('hidden');
         }
@@ -654,20 +783,32 @@ const App = {
             .filter(p => this.presentPlayers.has(p));
 
         const rrl = document.getElementById('rest-request-list');
-        rrl.innerHTML = allInRound.map(name => {
+        rrl.innerHTML = '';
+        allInRound.forEach(name => {
             const s = this.playerStats[name];
-            return `
-                <div class="rest-request-item">
-                    <div class="player-label">
-                        <span>${name}</span>
-                        <span class="mini-stats">Played: ${s?.gamesPlayed || 0} | Rested: ${s?.restCount || 0}</span>
-                    </div>
-                    <button class="rest-toggle ${this.restRequests.has(name) ? 'active' : ''}"
-                            onclick="App.toggleRestRequest('${name}', this)">
-                    </button>
-                </div>
-            `;
-        }).join('');
+            const item = document.createElement('div');
+            item.className = 'rest-request-item';
+
+            const playerLabel = document.createElement('div');
+            playerLabel.className = 'player-label';
+
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = name;
+            const statsSpan = document.createElement('span');
+            statsSpan.className = 'mini-stats';
+            statsSpan.textContent = `Played: ${s?.gamesPlayed || 0} | Rested: ${s?.restCount || 0}`;
+
+            playerLabel.appendChild(nameSpan);
+            playerLabel.appendChild(statsSpan);
+
+            const button = document.createElement('button');
+            button.className = `rest-toggle ${this.restRequests.has(name) ? 'active' : ''}`.trim();
+            button.dataset.name = name;
+
+            item.appendChild(playerLabel);
+            item.appendChild(button);
+            rrl.appendChild(item);
+        });
     },
 
     toggleRestRequest(name, btn) {
@@ -692,46 +833,107 @@ const App = {
         if (!confirm('End this session?')) return;
 
         const sc = document.getElementById('summary-content');
-        let html = `
-            <div class="summary-stat">
-                <span class="label">Total Rounds</span>
-                <span class="value">${this.rounds.length}</span>
-            </div>
-            <div class="summary-stat">
-                <span class="label">Courts</span>
-                <span class="value">${this.courts}</span>
-            </div>
-            <div class="summary-stat">
-                <span class="label">Players</span>
-                <span class="value">${Object.keys(this.playerStats).filter(n =>
-                    this.playerStats[n].gamesPlayed > 0 || this.playerStats[n].restCount > 0
-                ).length}</span>
-            </div>
-            <table class="summary-table">
-                <thead>
-                    <tr><th>Player</th><th>Played</th><th>Rested</th><th>Partners</th></tr>
-                </thead>
-                <tbody>
+        sc.innerHTML = '';
+        const activePlayers = Object.entries(this.playerStats)
+            .filter(([_, s]) => s.gamesPlayed > 0 || s.restCount > 0)
+            .sort((a, b) => b[1].gamesPlayed - a[1].gamesPlayed);
+
+        const summaryStats = [
+            { label: 'Total Rounds', value: this.rounds.length },
+            { label: 'Courts', value: this.courts },
+            { label: 'Players', value: activePlayers.length }
+        ];
+
+        summaryStats.forEach(stat => {
+            const card = document.createElement('div');
+            card.className = 'summary-stat';
+            const label = document.createElement('span');
+            label.className = 'label';
+            label.textContent = stat.label;
+            const value = document.createElement('span');
+            value.className = 'value';
+            value.textContent = String(stat.value);
+            card.appendChild(label);
+            card.appendChild(value);
+            sc.appendChild(card);
+        });
+
+        const table = document.createElement('table');
+        table.className = 'summary-table';
+
+        const thead = document.createElement('thead');
+        const headRow = document.createElement('tr');
+        ['Player', 'Played', 'Rested', 'Partners'].forEach(col => {
+            const th = document.createElement('th');
+            th.textContent = col;
+            headRow.appendChild(th);
+        });
+        thead.appendChild(headRow);
+
+        const tbody = document.createElement('tbody');
+        activePlayers.forEach(([name, stats]) => {
+            const row = document.createElement('tr');
+            const uniquePartners = [...new Set(stats.partners)].length;
+            const values = [name, stats.gamesPlayed, stats.restCount, uniquePartners];
+
+            values.forEach((value, index) => {
+                const cell = document.createElement('td');
+                if (index === 0) {
+                    const strong = document.createElement('strong');
+                    strong.textContent = String(value);
+                    cell.appendChild(strong);
+                } else {
+                    cell.textContent = String(value);
+                }
+                row.appendChild(cell);
+            });
+            tbody.appendChild(row);
+        });
+
+        table.appendChild(thead);
+        table.appendChild(tbody);
+        sc.appendChild(table);
+        this.showScreen('screen-summary');
+    },
+
+    showUpdatePrompt(worker) {
+        const existing = document.getElementById('update-toast');
+        if (existing) return;
+
+        const toast = document.createElement('div');
+        toast.id = 'update-toast';
+        toast.className = 'toast';
+        toast.style.cssText = `
+            position: fixed;
+            bottom: 120px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--card-bg);
+            color: var(--text);
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-size: 14px;
+            z-index: 1100;
+            border: 1px solid var(--card-border);
+            display: flex;
+            align-items: center;
+            gap: 10px;
         `;
 
-        Object.entries(this.playerStats)
-            .filter(([_, s]) => s.gamesPlayed > 0 || s.restCount > 0)
-            .sort((a, b) => b[1].gamesPlayed - a[1].gamesPlayed)
-            .forEach(([name, stats]) => {
-                const up = [...new Set(stats.partners)].length;
-                html += `
-                    <tr>
-                        <td><strong>${name}</strong></td>
-                        <td>${stats.gamesPlayed}</td>
-                        <td>${stats.restCount}</td>
-                        <td>${up}</td>
-                    </tr>
-                `;
-            });
+        const text = document.createElement('span');
+        text.textContent = 'New version available.';
 
-        html += '</tbody></table>';
-        sc.innerHTML = html;
-        this.showScreen('screen-summary');
+        const button = document.createElement('button');
+        button.className = 'btn btn-primary';
+        button.textContent = 'Refresh';
+        button.addEventListener('click', () => {
+            worker.postMessage({ type: 'SKIP_WAITING' });
+            toast.remove();
+        });
+
+        toast.appendChild(text);
+        toast.appendChild(button);
+        document.body.appendChild(toast);
     },
 
     newSession() {

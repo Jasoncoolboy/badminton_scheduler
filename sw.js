@@ -1,40 +1,92 @@
-const CACHE_NAME = 'shuttle-scheduler-v1';
-const ASSETS = [
+const SW_VERSION = 'v2';
+const CORE_CACHE = `shuttle-core-${SW_VERSION}`;
+const RUNTIME_CACHE = `shuttle-runtime-${SW_VERSION}`;
+
+const CORE_ASSETS = [
     './',
     './index.html',
-    './style.css',
-    './app.js',
-    './manifest.json',
-    './icons/icon-192.png',
-    './icons/icon-512.png'
+    './style.css?v=2.0.0',
+    './app.js?v=2.0.0',
+    './manifest.json?v=2.0.0'
 ];
 
-// Install
 self.addEventListener('install', event => {
     event.waitUntil(
-        caches.open(CACHE_NAME)
-            .then(cache => cache.addAll(ASSETS))
-            .then(() => self.skipWaiting())
+        caches.open(CORE_CACHE).then(cache =>
+            Promise.allSettled(CORE_ASSETS.map(asset => cache.add(asset)))
+        )
     );
 });
 
-// Activate
 self.addEventListener('activate', event => {
     event.waitUntil(
-        caches.keys().then(keys => {
-            return Promise.all(
-                keys.filter(key => key !== CACHE_NAME)
+        caches.keys()
+            .then(keys => Promise.all(
+                keys
+                    .filter(key => key !== CORE_CACHE && key !== RUNTIME_CACHE)
                     .map(key => caches.delete(key))
-            );
-        }).then(() => self.clients.claim())
+            ))
+            .then(() => self.clients.claim())
     );
 });
 
-// Fetch
+self.addEventListener('message', event => {
+    if (event.data && event.data.type === 'SKIP_WAITING') {
+        self.skipWaiting();
+    }
+});
+
+function isSameOrigin(request) {
+    const requestUrl = new URL(request.url);
+    return requestUrl.origin === self.location.origin;
+}
+
+async function networkFirst(request) {
+    const cache = await caches.open(CORE_CACHE);
+    try {
+        const networkResponse = await fetch(request);
+        cache.put(request, networkResponse.clone());
+        return networkResponse;
+    } catch (error) {
+        const cached = await cache.match(request);
+        if (cached) return cached;
+        return caches.match('./index.html');
+    }
+}
+
+async function staleWhileRevalidate(request) {
+    const cache = await caches.open(RUNTIME_CACHE);
+    const cached = await cache.match(request);
+    const networkPromise = fetch(request)
+        .then(response => {
+            cache.put(request, response.clone());
+            return response;
+        })
+        .catch(() => null);
+
+    if (cached) {
+        networkPromise.catch(() => null);
+        return cached;
+    }
+    const networkResponse = await networkPromise;
+    if (networkResponse) return networkResponse;
+    return caches.match(request);
+}
+
 self.addEventListener('fetch', event => {
-    event.respondWith(
-        caches.match(event.request)
-            .then(response => response || fetch(event.request))
-            .catch(() => caches.match('./index.html'))
-    );
+    if (event.request.method !== 'GET') return;
+    if (!isSameOrigin(event.request)) return;
+
+    const requestUrl = new URL(event.request.url);
+    const isNavigation = event.request.mode === 'navigate';
+    const isStaticAsset = /\.(?:js|css|png|jpg|jpeg|gif|svg|webp|json)$/i.test(requestUrl.pathname);
+
+    if (isNavigation) {
+        event.respondWith(networkFirst(event.request));
+        return;
+    }
+
+    if (isStaticAsset) {
+        event.respondWith(staleWhileRevalidate(event.request));
+    }
 });
