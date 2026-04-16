@@ -13,6 +13,7 @@ const App = {
     playerStats: {},
     restRequests: new Set(),
     presentPlayers: new Set(),
+    roundSnapshots: [],
     swRegistration: null,
     hasPendingRefresh: false,
 
@@ -105,6 +106,7 @@ const App = {
 
         // Round
         document.getElementById('next-round-btn').addEventListener('click', () => this.nextRound());
+        document.getElementById('undo-round-btn').addEventListener('click', () => this.undoLastRound());
         document.getElementById('end-session-btn').addEventListener('click', () => this.endSession());
 
         // Summary
@@ -273,6 +275,7 @@ const App = {
 
         this.rounds = [];
         this.currentRound = 0;
+        this.roundSnapshots = [];
         this.restRequests.clear();
         this.presentPlayers = new Set(this.sessionPlayers);
 
@@ -478,7 +481,41 @@ const App = {
     // ==========================================
     // ROUND GENERATION
     // ==========================================
+    deepClone(value) {
+        if (typeof structuredClone === 'function') {
+            return structuredClone(value);
+        }
+        return JSON.parse(JSON.stringify(value));
+    },
+
+    captureRoundSnapshot() {
+        this.roundSnapshots.push({
+            sessionPlayers: [...this.sessionPlayers],
+            courts: this.courts,
+            rounds: this.deepClone(this.rounds),
+            currentRound: this.currentRound,
+            pairingHistory: this.deepClone(this.pairingHistory),
+            opponentHistory: this.deepClone(this.opponentHistory),
+            playerStats: this.deepClone(this.playerStats),
+            restRequests: [...this.restRequests],
+            presentPlayers: [...this.presentPlayers]
+        });
+    },
+
+    restoreRoundSnapshot(snapshot) {
+        this.sessionPlayers = [...snapshot.sessionPlayers];
+        this.courts = snapshot.courts;
+        this.rounds = this.deepClone(snapshot.rounds);
+        this.currentRound = snapshot.currentRound;
+        this.pairingHistory = this.deepClone(snapshot.pairingHistory);
+        this.opponentHistory = this.deepClone(snapshot.opponentHistory);
+        this.playerStats = this.deepClone(snapshot.playerStats);
+        this.restRequests = new Set(snapshot.restRequests);
+        this.presentPlayers = new Set(snapshot.presentPlayers);
+    },
+
     generateRound() {
+        this.captureRoundSnapshot();
         this.currentRound++;
         const round = this.createRoundSchedule();
         this.rounds.push(round);
@@ -829,6 +866,32 @@ const App = {
         this.showScreen('screen-attendance');
     },
 
+    undoLastRound() {
+        if (this.roundSnapshots.length === 0 || this.rounds.length === 0) {
+            this.showToast('No round to undo.');
+            return;
+        }
+
+        const roundToUndo = this.currentRound;
+        if (!confirm(`Undo Round ${roundToUndo}? This will restore stats and pairings to the previous state.`)) {
+            return;
+        }
+
+        const snapshot = this.roundSnapshots.pop();
+        this.restoreRoundSnapshot(snapshot);
+
+        if (this.rounds.length > 0) {
+            this.renderRound(this.rounds[this.rounds.length - 1]);
+            this.showScreen('screen-round');
+            this.showToast(`Round ${this.currentRound + 1} undone.`);
+            return;
+        }
+
+        this.renderAttendance();
+        this.showScreen('screen-attendance');
+        this.showToast('Round 1 undone.');
+    },
+
     endSession() {
         if (!confirm('End this session?')) return;
 
@@ -941,6 +1004,7 @@ const App = {
         this.courts = 0;
         this.rounds = [];
         this.currentRound = 0;
+        this.roundSnapshots = [];
         this.pairingHistory = {};
         this.opponentHistory = {};
         this.playerStats = {};
