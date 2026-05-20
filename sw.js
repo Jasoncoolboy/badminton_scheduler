@@ -1,20 +1,22 @@
-const SW_VERSION = 'v2';
+const SW_VERSION = 'v3';
+const APP_VERSION = '2.1.0';
 const CORE_CACHE = `shuttle-core-${SW_VERSION}`;
 const RUNTIME_CACHE = `shuttle-runtime-${SW_VERSION}`;
 
 const CORE_ASSETS = [
     './',
     './index.html',
-    './style.css?v=2.0.0',
-    './app.js?v=2.0.0',
-    './manifest.json?v=2.0.0'
+    `./style.css?v=${APP_VERSION}`,
+    `./app.js?v=${APP_VERSION}`,
+    `./manifest.json?v=${APP_VERSION}`,
+    `./sw.js?v=${APP_VERSION}`
 ];
 
 self.addEventListener('install', event => {
     event.waitUntil(
-        caches.open(CORE_CACHE).then(cache =>
-            Promise.allSettled(CORE_ASSETS.map(asset => cache.add(asset)))
-        )
+        caches.open(CORE_CACHE)
+            .then(cache => Promise.allSettled(CORE_ASSETS.map(asset => cache.add(asset))))
+            .then(() => self.skipWaiting())
     );
 });
 
@@ -54,23 +56,8 @@ async function networkFirst(request) {
     }
 }
 
-async function staleWhileRevalidate(request) {
-    const cache = await caches.open(RUNTIME_CACHE);
-    const cached = await cache.match(request);
-    const networkPromise = fetch(request)
-        .then(response => {
-            cache.put(request, response.clone());
-            return response;
-        })
-        .catch(() => null);
-
-    if (cached) {
-        networkPromise.catch(() => null);
-        return cached;
-    }
-    const networkResponse = await networkPromise;
-    if (networkResponse) return networkResponse;
-    return caches.match(request);
+function isAppShellAsset(pathname) {
+    return /\.(?:js|css)$/i.test(pathname) || pathname.endsWith('/sw.js');
 }
 
 self.addEventListener('fetch', event => {
@@ -79,14 +66,8 @@ self.addEventListener('fetch', event => {
 
     const requestUrl = new URL(event.request.url);
     const isNavigation = event.request.mode === 'navigate';
-    const isStaticAsset = /\.(?:js|css|png|jpg|jpeg|gif|svg|webp|json)$/i.test(requestUrl.pathname);
 
-    if (isNavigation) {
+    if (isNavigation || isAppShellAsset(requestUrl.pathname)) {
         event.respondWith(networkFirst(event.request));
-        return;
-    }
-
-    if (isStaticAsset) {
-        event.respondWith(staleWhileRevalidate(event.request));
     }
 });

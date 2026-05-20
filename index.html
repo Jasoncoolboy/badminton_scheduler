@@ -8,8 +8,8 @@
     <meta name="apple-mobile-web-app-title" content="Shuttle">
     <meta name="theme-color" content="#1a1a2e">
     <title>Badminton Scheduler</title>
-    <link rel="manifest" href="manifest.json?v=2.0.0">
-    <link rel="stylesheet" href="style.css?v=2.0.0">
+    <link rel="manifest" href="manifest.json?v=2.1.0">
+    <link rel="stylesheet" href="style.css?v=2.1.0">
 </head>
 <body>
     <div id="app">
@@ -62,7 +62,21 @@
                 </div>
             </div>
 
+            <div class="card courts-adjust-card">
+                <h2>Courts</h2>
+                <p class="subtitle courts-hint">Reduce if a court’s time slot has ended</p>
+                <div class="court-selector attendance-court-selector" id="attendance-court-selector">
+                    <button type="button" class="btn btn-court" data-courts="1">1</button>
+                    <button type="button" class="btn btn-court" data-courts="2">2</button>
+                    <button type="button" class="btn btn-court" data-courts="3">3</button>
+                    <button type="button" class="btn btn-court" data-courts="4">4</button>
+                    <button type="button" class="btn btn-court" data-courts="5">5</button>
+                </div>
+                <p id="attendance-courts-display">Courts active: <strong>0</strong></p>
+            </div>
+
             <div id="attendance-list" class="attendance-list"></div>
+            <p class="subtitle attendance-hint">Tap row to toggle · × to remove (left early)</p>
 
             <div id="attendance-summary" class="attendance-summary"></div>
 
@@ -115,6 +129,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=2.0.0"></script>
+    <script src="app.js?v=2.1.0"></script>
 </body>
 </html>

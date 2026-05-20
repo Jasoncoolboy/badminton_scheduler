@@ -1,6 +1,9 @@
 // ==========================================
-// BADMINTON MATCH SCHEDULER - PWA v2
+// BADMINTON MATCH SCHEDULER - PWA v2.1
 // ==========================================
+
+const APP_VERSION = '2.1.0';
+const SESSION_STORAGE_KEY = 'badminton_active_session';
 
 const App = {
     sessionPlayers: [],
@@ -14,6 +17,8 @@ const App = {
     restRequests: new Set(),
     presentPlayers: new Set(),
     roundSnapshots: [],
+    activeScreen: 'screen-setup',
+    sessionActive: false,
     swRegistration: null,
     hasPendingRefresh: false,
 
@@ -25,11 +30,15 @@ const App = {
         this.bindEvents();
         this.renderSavedPlayers();
         this.registerSW();
+
+        if (this.restoreSession()) {
+            this.showToast('Session restored after refresh');
+        }
     },
 
     registerSW() {
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('sw.js')
+            navigator.serviceWorker.register(`sw.js?v=${APP_VERSION}`)
                 .then(registration => {
                     this.swRegistration = registration;
                     console.log('SW registered');
@@ -78,6 +87,77 @@ const App = {
         const allNames = [...new Set([...this.savedPlayers, ...this.sessionPlayers])];
         this.savedPlayers = allNames;
         localStorage.setItem('badminton_saved_players', JSON.stringify(allNames));
+    },
+
+    persistSession() {
+        if (!this.sessionActive || this.courts <= 0 || this.sessionPlayers.length < 2) {
+            return;
+        }
+
+        try {
+            const payload = {
+                version: APP_VERSION,
+                sessionPlayers: this.sessionPlayers,
+                courts: this.courts,
+                rounds: this.rounds,
+                currentRound: this.currentRound,
+                pairingHistory: this.pairingHistory,
+                opponentHistory: this.opponentHistory,
+                playerStats: this.playerStats,
+                restRequests: [...this.restRequests],
+                presentPlayers: [...this.presentPlayers],
+                roundSnapshots: this.roundSnapshots,
+                activeScreen: this.activeScreen
+            };
+            localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(payload));
+        } catch (e) {
+            console.warn('Could not save session:', e);
+        }
+    },
+
+    clearSession() {
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+    },
+
+    restoreSession() {
+        try {
+            const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+            if (!raw) return false;
+
+            const data = JSON.parse(raw);
+            if (!data.sessionPlayers?.length || !data.courts) return false;
+
+            this.sessionPlayers = data.sessionPlayers;
+            this.courts = data.courts;
+            this.rounds = data.rounds || [];
+            this.currentRound = data.currentRound || 0;
+            this.pairingHistory = data.pairingHistory || {};
+            this.opponentHistory = data.opponentHistory || {};
+            this.playerStats = data.playerStats || {};
+            this.restRequests = new Set(data.restRequests || []);
+            this.presentPlayers = new Set(data.presentPlayers || this.sessionPlayers);
+            this.roundSnapshots = data.roundSnapshots || [];
+            this.activeScreen = data.activeScreen || 'screen-attendance';
+            this.sessionActive = true;
+
+            this.renderPlayerList();
+            this.validateSetup();
+
+            if (this.activeScreen === 'screen-round' && this.rounds.length > 0) {
+                this.renderRound(this.rounds[this.rounds.length - 1]);
+            } else if (this.activeScreen === 'screen-summary') {
+                this.activeScreen = 'screen-attendance';
+            } else {
+                this.renderAttendance();
+            }
+
+            this.showScreen(this.activeScreen);
+            return true;
+        } catch (e) {
+            console.warn('Could not restore session:', e);
+            this.clearSession();
+            return false;
+        }
     },
 
     // ==========================================
@@ -130,23 +210,38 @@ const App = {
         });
 
         document.getElementById('attendance-list').addEventListener('click', (event) => {
+            const removeBtn = event.target.closest('.remove-attendance-player');
+            if (removeBtn) {
+                this.removePlayerFromSession(removeBtn.dataset.name || '');
+                return;
+            }
+
             const row = event.target.closest('.attendance-item');
             if (row) this.toggleAttendance(row.dataset.name || '');
+        });
+
+        document.getElementById('attendance-court-selector').addEventListener('click', (event) => {
+            const btn = event.target.closest('.btn-court');
+            if (btn) this.selectCourts(parseInt(btn.dataset.courts, 10), true);
         });
 
         document.getElementById('rest-request-list').addEventListener('click', (event) => {
             const toggleBtn = event.target.closest('.rest-toggle');
             if (toggleBtn) this.toggleRestRequest(toggleBtn.dataset.name || '', toggleBtn);
         });
+
+        window.addEventListener('pagehide', () => this.persistSession());
     },
 
     // ==========================================
     // SCREENS
     // ==========================================
     showScreen(screenId) {
+        this.activeScreen = screenId;
         document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
         document.getElementById(screenId).classList.add('active');
         window.scrollTo(0, 0);
+        this.persistSession();
     },
 
     // ==========================================
@@ -245,13 +340,34 @@ const App = {
     // ==========================================
     // COURTS
     // ==========================================
-    selectCourts(num) {
+    selectCourts(num, fromAttendance = false) {
+        const prev = this.courts;
         this.courts = num;
-        document.querySelectorAll('.btn-court').forEach(btn => {
-            btn.classList.toggle('selected', parseInt(btn.dataset.courts) === num);
-        });
-        document.querySelector('#courts-display strong').textContent = num;
+
+        document.querySelectorAll('#screen-setup .btn-court, #attendance-court-selector .btn-court')
+            .forEach(btn => {
+                btn.classList.toggle('selected', parseInt(btn.dataset.courts, 10) === num);
+            });
+
+        const setupDisplay = document.querySelector('#courts-display strong');
+        if (setupDisplay) setupDisplay.textContent = num;
+
+        const attendanceDisplay = document.querySelector('#attendance-courts-display strong');
+        if (attendanceDisplay) attendanceDisplay.textContent = num;
+
         this.validateSetup();
+
+        if (fromAttendance && prev !== num) {
+            this.renderAttendance();
+            this.persistSession();
+            this.showToast(`Courts set to ${num}`);
+        }
+    },
+
+    syncCourtSelectors() {
+        if (this.courts > 0) {
+            this.selectCourts(this.courts);
+        }
     },
 
     validateSetup() {
@@ -264,6 +380,7 @@ const App = {
     // ==========================================
     startSession() {
         this.persistSavedPlayers();
+        this.sessionActive = true;
 
         this.playerStats = {};
         this.pairingHistory = {};
@@ -279,8 +396,10 @@ const App = {
         this.restRequests.clear();
         this.presentPlayers = new Set(this.sessionPlayers);
 
+        this.syncCourtSelectors();
         this.renderAttendance();
         this.showScreen('screen-attendance');
+        this.persistSession();
     },
 
     // ==========================================
@@ -355,13 +474,39 @@ const App = {
 
         input.value = '';
         this.renderAttendance();
+        this.persistSession();
         this.showToast(`${name} added! They'll get priority to play.`);
+    },
+
+    removePlayerFromSession(name) {
+        if (!name) return;
+
+        const stats = this.playerStats[name];
+        const hasHistory = stats && (stats.gamesPlayed > 0 || stats.restCount > 0);
+        const msg = hasHistory
+            ? `Remove ${name} from this session? Their stats for today will be kept in the summary.`
+            : `Remove ${name} from this session?`;
+
+        if (!confirm(msg)) return;
+
+        this.sessionPlayers = this.sessionPlayers.filter(p => p !== name);
+        this.presentPlayers.delete(name);
+        this.restRequests.delete(name);
+
+        if (this.sessionPlayers.length < 2) {
+            this.showToast('Need at least 2 players. End session or add players.');
+        }
+
+        this.renderAttendance();
+        this.persistSession();
+        this.showToast(`${name} removed from session`);
     },
 
     // ==========================================
     // ATTENDANCE
     // ==========================================
     renderAttendance() {
+        this.syncCourtSelectors();
         const container = document.getElementById('attendance-list');
         container.innerHTML = '';
 
@@ -398,8 +543,16 @@ const App = {
             status.className = 'attendance-status';
             status.textContent = isPresent ? '✅' : '❌';
 
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'remove-attendance-player';
+            removeBtn.dataset.name = name;
+            removeBtn.setAttribute('aria-label', `Remove ${name}`);
+            removeBtn.textContent = '\u00D7';
+
             row.appendChild(info);
             row.appendChild(status);
+            row.appendChild(removeBtn);
             container.appendChild(row);
         });
 
@@ -429,6 +582,7 @@ const App = {
             this.initPlayerData(name);
         }
         this.renderAttendance();
+        this.persistSession();
     },
 
     // ==========================================
@@ -522,6 +676,7 @@ const App = {
         this.updateStats(round);
         this.renderRound(round);
         this.showScreen('screen-round');
+        this.persistSession();
     },
 
     createRoundSchedule() {
@@ -856,6 +1011,7 @@ const App = {
             this.restRequests.add(name);
             btn.classList.add('active');
         }
+        this.persistSession();
     },
 
     // ==========================================
@@ -864,6 +1020,7 @@ const App = {
     nextRound() {
         this.renderAttendance();
         this.showScreen('screen-attendance');
+        this.persistSession();
     },
 
     undoLastRound() {
@@ -884,16 +1041,21 @@ const App = {
             this.renderRound(this.rounds[this.rounds.length - 1]);
             this.showScreen('screen-round');
             this.showToast(`Round ${this.currentRound + 1} undone.`);
+            this.persistSession();
             return;
         }
 
         this.renderAttendance();
         this.showScreen('screen-attendance');
         this.showToast('Round 1 undone.');
+        this.persistSession();
     },
 
     endSession() {
         if (!confirm('End this session?')) return;
+
+        this.sessionActive = false;
+        this.clearSession();
 
         const sc = document.getElementById('summary-content');
         sc.innerHTML = '';
@@ -984,7 +1146,7 @@ const App = {
         `;
 
         const text = document.createElement('span');
-        text.textContent = 'New version available.';
+        text.textContent = 'Update available. Tap Refresh (close other tabs if stuck).';
 
         const button = document.createElement('button');
         button.className = 'btn btn-primary';
@@ -1000,6 +1162,8 @@ const App = {
     },
 
     newSession() {
+        this.sessionActive = false;
+        this.clearSession();
         this.sessionPlayers = [];
         this.courts = 0;
         this.rounds = [];
@@ -1010,6 +1174,7 @@ const App = {
         this.playerStats = {};
         this.restRequests.clear();
         this.presentPlayers.clear();
+        this.activeScreen = 'screen-setup';
 
         document.getElementById('player-list').innerHTML = '';
         document.querySelectorAll('.btn-court').forEach(b => b.classList.remove('selected'));
