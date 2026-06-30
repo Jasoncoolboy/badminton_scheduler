@@ -1,5 +1,5 @@
-const SW_VERSION = 'v3';
-const APP_VERSION = '2.1.0';
+const SW_VERSION = 'v4';
+const APP_VERSION = '2.2.0';
 const CORE_CACHE = `shuttle-core-${SW_VERSION}`;
 const RUNTIME_CACHE = `shuttle-runtime-${SW_VERSION}`;
 

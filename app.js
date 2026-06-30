@@ -2,7 +2,7 @@
 // BADMINTON MATCH SCHEDULER - PWA v2.1
 // ==========================================
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.2.0';
 const SESSION_STORAGE_KEY = 'badminton_active_session';
 
 const App = {
@@ -729,10 +729,20 @@ const App = {
     },
 
     createMatches(players, doublesCount, singlesCount) {
+        if (doublesCount > 0 && singlesCount === 0 && players.length === doublesCount * 4) {
+            const optimized = this.findBestDoublesSchedule(players, doublesCount);
+            if (optimized) return optimized;
+        }
+
+        if (doublesCount > 0 && singlesCount > 0 &&
+            players.length === (doublesCount * 4) + (singlesCount * 2)) {
+            const optimized = this.findBestMixedSchedule(players, doublesCount, singlesCount);
+            if (optimized) return optimized;
+        }
+
+        // Fallback for uneven player counts
         const matches = [];
         let assigned = new Set();
-
-        // Slight shuffle for variety
         let pool = [...players].sort(() => Math.random() - 0.5);
 
         for (let i = 0; i < doublesCount; i++) {
@@ -768,6 +778,232 @@ const App = {
         return matches;
     },
 
+    combinations(arr, k) {
+        if (k === 0) return [[]];
+        if (arr.length < k) return [];
+        const [first, ...rest] = arr;
+        return [
+            ...this.combinations(rest, k - 1).map(combo => [first, ...combo]),
+            ...this.combinations(rest, k)
+        ];
+    },
+
+    partitionIntoFixedGroups(players, groupCount, groupSize) {
+        const pool = [...players].sort();
+        const results = [];
+
+        if (pool.length !== groupCount * groupSize) return results;
+
+        const build = (remaining, groupsLeft, current) => {
+            if (groupsLeft === 0) {
+                if (remaining.length === 0) {
+                    results.push(current.map(group => [...group]));
+                }
+                return;
+            }
+            if (groupsLeft === 1) {
+                if (remaining.length === groupSize) {
+                    build([], 0, [...current, remaining]);
+                }
+                return;
+            }
+
+            const anchor = remaining[0];
+            const rest = remaining.slice(1);
+            for (const combo of this.combinations(rest, groupSize - 1)) {
+                const group = [anchor, ...combo];
+                const left = rest.filter(p => !combo.includes(p));
+                build(left, groupsLeft - 1, [...current, group]);
+            }
+        };
+
+        build(pool, groupCount, []);
+        return results;
+    },
+
+    getAllTeamSplits(fourPlayers) {
+        const [a, b, c, d] = fourPlayers;
+        return [
+            { team1: [a, b], team2: [c, d] },
+            { team1: [a, c], team2: [b, d] },
+            { team1: [a, d], team2: [b, c] }
+        ];
+    },
+
+    forEachSplitCombination(splitOptions, callback) {
+        const recurse = (idx, current) => {
+            if (idx === splitOptions.length) {
+                callback(current);
+                return;
+            }
+            for (const split of splitOptions[idx]) {
+                recurse(idx + 1, [...current, split]);
+            }
+        };
+        recurse(0, []);
+    },
+
+    partneredInLastRound(p1, p2) {
+        if (!this.rounds.length) return false;
+        const last = this.rounds[this.rounds.length - 1];
+        for (const match of last.matches) {
+            if (match.type !== 'doubles') continue;
+            if ((match.team1.includes(p1) && match.team1.includes(p2)) ||
+                (match.team2.includes(p1) && match.team2.includes(p2))) {
+                return true;
+            }
+        }
+        return false;
+    },
+
+    opposedInLastRound(p1, p2) {
+        if (!this.rounds.length) return false;
+        const last = this.rounds[this.rounds.length - 1];
+        for (const match of last.matches) {
+            const crossed = (match.team1.includes(p1) && match.team2.includes(p2)) ||
+                (match.team1.includes(p2) && match.team2.includes(p1));
+            if (crossed) return true;
+        }
+        return false;
+    },
+
+    sameDoublesMatchAsLastRound(team1, team2) {
+        if (!this.rounds.length) return false;
+        const players = new Set([...team1, ...team2]);
+        const last = this.rounds[this.rounds.length - 1];
+
+        for (const match of last.matches) {
+            if (match.type !== 'doubles') continue;
+            const lastPlayers = new Set([...match.team1, ...match.team2]);
+            if (players.size !== lastPlayers.size) continue;
+            if (![...players].every(p => lastPlayers.has(p))) continue;
+
+            const sameTeams = team1.every(p => match.team1.includes(p)) &&
+                team2.every(p => match.team2.includes(p));
+            const swappedTeams = team1.every(p => match.team2.includes(p)) &&
+                team2.every(p => match.team1.includes(p));
+            if (sameTeams || swappedTeams) return true;
+        }
+        return false;
+    },
+
+    getPartnershipCost(p1, p2) {
+        const count = this.pairingHistory[p1]?.[p2] || 0;
+        let cost = count * count;
+        if (this.partneredInLastRound(p1, p2)) cost += 50;
+        return cost;
+    },
+
+    getOpponentCostBetween(p1, p2) {
+        const count = this.opponentHistory[p1]?.[p2] || 0;
+        let cost = count;
+        if (this.opposedInLastRound(p1, p2)) cost += 10;
+        return cost;
+    },
+
+    getOpponentCost(team1, team2) {
+        let cost = 0;
+        team1.forEach(p1 => {
+            team2.forEach(p2 => {
+                cost += this.getOpponentCostBetween(p1, p2);
+            });
+        });
+        return cost;
+    },
+
+    scoreDoublesMatch(team1, team2) {
+        let score = this.getPartnershipCost(team1[0], team1[1]);
+        score += this.getPartnershipCost(team2[0], team2[1]);
+        score += this.getOpponentCost(team1, team2);
+        if (this.sameDoublesMatchAsLastRound(team1, team2)) score += 500;
+        return score;
+    },
+
+    scoreDoublesConfiguration(matches) {
+        let score = matches.reduce(
+            (total, match) => total + this.scoreDoublesMatch(match.team1, match.team2),
+            0
+        );
+        return score + Math.random() * 0.01;
+    },
+
+    findBestDoublesSchedule(players, matchCount) {
+        const partitions = this.partitionIntoFixedGroups(players, matchCount, 4);
+        if (!partitions.length) return null;
+
+        let bestMatches = null;
+        let bestScore = Infinity;
+
+        for (const groups of partitions) {
+            const splitOptions = groups.map(group => this.getAllTeamSplits(group));
+            this.forEachSplitCombination(splitOptions, splits => {
+                const config = splits.map((teams, i) => ({
+                    court: i + 1,
+                    type: 'doubles',
+                    team1: teams.team1,
+                    team2: teams.team2
+                }));
+                const score = this.scoreDoublesConfiguration(config);
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestMatches = config;
+                }
+            });
+        }
+
+        return bestMatches;
+    },
+
+    findBestMixedSchedule(players, doublesCount, singlesCount) {
+        const singlesSlots = singlesCount * 2;
+        let bestMatches = null;
+        let bestScore = Infinity;
+
+        for (const singlesGroup of this.combinations(players, singlesSlots)) {
+            const remaining = players.filter(p => !singlesGroup.includes(p));
+            const doublesMatches = this.findBestDoublesSchedule(remaining, doublesCount);
+            if (!doublesMatches) continue;
+
+            const singlesPair = this.findBestSinglesPair(singlesGroup);
+            const singlesScore = this.getOpponentCostBetween(singlesPair[0], singlesPair[1]);
+            const totalScore = this.scoreDoublesConfiguration(doublesMatches) + singlesScore;
+
+            if (totalScore < bestScore) {
+                bestScore = totalScore;
+                bestMatches = [
+                    ...doublesMatches,
+                    {
+                        court: doublesCount + 1,
+                        type: 'singles',
+                        team1: [singlesPair[0]],
+                        team2: [singlesPair[1]]
+                    }
+                ].map((match, i) => ({ ...match, court: i + 1 }));
+            }
+        }
+
+        return bestMatches;
+    },
+
+    findBestSinglesPair(players) {
+        if (players.length === 2) return players;
+
+        let bestPair = [players[0], players[1]];
+        let bestScore = Infinity;
+
+        for (let i = 0; i < players.length; i++) {
+            for (let j = i + 1; j < players.length; j++) {
+                const score = this.getOpponentCostBetween(players[i], players[j]) + Math.random() * 0.01;
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestPair = [players[i], players[j]];
+                }
+            }
+        }
+
+        return bestPair;
+    },
+
     formDoublesTeams(available) {
         if (available.length < 4) return null;
 
@@ -776,8 +1012,10 @@ const App = {
             for (let j = i + 1; j < available.length; j++) {
                 const p1 = available[i];
                 const p2 = available[j];
-                const score = (this.pairingHistory[p1]?.[p2]) || 0;
-                pairs.push({ players: [p1, p2], score });
+                pairs.push({
+                    players: [p1, p2],
+                    score: this.getPartnershipCost(p1, p2)
+                });
             }
         }
 
@@ -788,19 +1026,15 @@ const App = {
 
         for (let i = 0; i < pairs.length; i++) {
             for (let j = i + 1; j < pairs.length; j++) {
-                const p1 = pairs[i].players;
-                const p2 = pairs[j].players;
+                const team1 = pairs[i].players;
+                const team2 = pairs[j].players;
 
-                if (p1[0] !== p2[0] && p1[0] !== p2[1] &&
-                    p1[1] !== p2[0] && p1[1] !== p2[1]) {
-
-                    const pairScore = pairs[i].score + pairs[j].score;
-                    const oppScore = this.getOpponentScore(p1, p2);
-                    const totalScore = pairScore * 2 + oppScore + Math.random() * 0.3;
-
-                    if (totalScore < bestScore) {
-                        bestScore = totalScore;
-                        bestTeams = { team1: [...p1], team2: [...p2] };
+                if (team1[0] !== team2[0] && team1[0] !== team2[1] &&
+                    team1[1] !== team2[0] && team1[1] !== team2[1]) {
+                    const score = this.scoreDoublesMatch(team1, team2);
+                    if (score < bestScore) {
+                        bestScore = score;
+                        bestTeams = { team1: [...team1], team2: [...team2] };
                     }
                 }
             }
@@ -809,34 +1043,8 @@ const App = {
         return bestTeams;
     },
 
-    getOpponentScore(team1, team2) {
-        let score = 0;
-        team1.forEach(p1 => {
-            team2.forEach(p2 => {
-                score += (this.opponentHistory[p1]?.[p2]) || 0;
-            });
-        });
-        return score;
-    },
-
     formSinglesMatch(available) {
-        if (available.length < 2) return available;
-
-        let bestPair = [available[0], available[1]];
-        let bestScore = Infinity;
-
-        for (let i = 0; i < available.length; i++) {
-            for (let j = i + 1; j < available.length; j++) {
-                const score = (this.opponentHistory[available[i]]?.[available[j]] || 0)
-                    + Math.random() * 0.3;
-                if (score < bestScore) {
-                    bestScore = score;
-                    bestPair = [available[i], available[j]];
-                }
-            }
-        }
-
-        return bestPair;
+        return this.findBestSinglesPair(available);
     },
 
     // ==========================================
