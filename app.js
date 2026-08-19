@@ -1,9 +1,11 @@
 // ==========================================
-// BADMINTON MATCH SCHEDULER - PWA v2.1
+// BADMINTON MATCH SCHEDULER - PWA
 // ==========================================
 
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.3.0';
 const SESSION_STORAGE_KEY = 'badminton_active_session';
+const UPDATE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+const UPDATE_CHECK_THROTTLE_MS = 30 * 1000;
 
 const App = {
     sessionPlayers: [],
@@ -21,6 +23,7 @@ const App = {
     sessionActive: false,
     swRegistration: null,
     hasPendingRefresh: false,
+    lastUpdateCheck: 0,
 
     // ==========================================
     // INIT
@@ -29,46 +32,135 @@ const App = {
         this.loadSavedPlayers();
         this.bindEvents();
         this.renderSavedPlayers();
+        this.renderVersion();
         this.registerSW();
+        this.watchForUpdates();
 
         if (this.restoreSession()) {
             this.showToast('Session restored after refresh');
         }
     },
 
+    // ==========================================
+    // 🔑 VERSION + UPDATES
+    // ==========================================
+    renderVersion(status) {
+        const label = document.getElementById('version-label');
+        if (label) label.textContent = `v${APP_VERSION}`;
+
+        const statusEl = document.getElementById('version-status');
+        if (statusEl) statusEl.textContent = status || 'Tap to check for updates';
+    },
+
     registerSW() {
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register(`sw.js?v=${APP_VERSION}`)
-                .then(registration => {
-                    this.swRegistration = registration;
-                    console.log('SW registered');
+        if (!('serviceWorker' in navigator)) return;
 
-                    if (registration.waiting) {
-                        this.showUpdatePrompt(registration.waiting);
-                    }
+        // Register a STABLE url: a versioned one (sw.js?v=x) is only ever as
+        // fresh as the cached app.js that names it, so a stuck device would
+        // keep asking for the version it already has. updateViaCache:'none'
+        // stops the HTTP cache answering the update check as well.
+        navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
+            .then(registration => {
+                this.swRegistration = registration;
 
-                    registration.addEventListener('updatefound', () => {
-                        const newWorker = registration.installing;
-                        if (!newWorker) return;
+                if (registration.waiting && navigator.serviceWorker.controller) {
+                    this.applyUpdate(registration.waiting);
+                }
 
-                        newWorker.addEventListener('statechange', () => {
-                            if (
-                                newWorker.state === 'installed' &&
-                                navigator.serviceWorker.controller
-                            ) {
-                                this.showUpdatePrompt(newWorker);
-                            }
-                        });
+                registration.addEventListener('updatefound', () => {
+                    const newWorker = registration.installing;
+                    if (!newWorker) return;
+
+                    newWorker.addEventListener('statechange', () => {
+                        if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                            this.applyUpdate(newWorker);
+                        }
                     });
-                })
-                .catch(err => console.log('SW failed:', err));
+                });
+            })
+            .catch(err => console.log('SW failed:', err));
 
-            navigator.serviceWorker.addEventListener('controllerchange', () => {
-                if (this.hasPendingRefresh) return;
-                this.hasPendingRefresh = true;
-                window.location.reload();
-            });
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+            if (this.hasPendingRefresh) return;
+            this.hasPendingRefresh = true;
+            this.persistSession();
+            window.location.reload();
+        });
+    },
+
+    applyUpdate(worker) {
+        this.renderVersion('Update ready — reloading…');
+        worker.postMessage({ type: 'SKIP_WAITING' });
+
+        // If the new worker never takes control, offer the manual button
+        // rather than looping on reloads.
+        setTimeout(() => {
+            if (!this.hasPendingRefresh) this.showUpdatePrompt(worker);
+        }, 4000);
+    },
+
+    // An installed Android PWA can go days without a fresh navigation, and
+    // nothing else prompts the browser to look for a new service worker.
+    // Ask it explicitly whenever the app comes back into use.
+    watchForUpdates() {
+        const check = () => this.checkForUpdate();
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') check();
+        });
+        window.addEventListener('focus', check);
+        window.addEventListener('online', check);
+        setInterval(check, UPDATE_CHECK_INTERVAL_MS);
+        check();
+    },
+
+    checkForUpdate(manual = false) {
+        const now = Date.now();
+        if (!manual && now - this.lastUpdateCheck < UPDATE_CHECK_THROTTLE_MS) {
+            return Promise.resolve();
         }
+        this.lastUpdateCheck = now;
+        if (manual) this.renderVersion('Checking…');
+
+        const swCheck = this.swRegistration
+            ? this.swRegistration.update().catch(() => {})
+            : Promise.resolve();
+
+        // version.json is a second opinion: it still spots a new release when
+        // the service worker itself is the thing that is stuck.
+        const publishedCheck = fetch(`version.json?t=${now}`, { cache: 'no-store' })
+            .then(response => (response.ok ? response.json() : null))
+            .catch(() => null);
+
+        return Promise.all([swCheck, publishedCheck]).then(([, published]) => {
+            const latest = published && published.version;
+
+            if (latest && latest !== APP_VERSION) {
+                this.renderVersion(`v${latest} available`);
+                if (manual) {
+                    this.showToast(`Updating to v${latest}…`);
+                    this.forceReload();
+                }
+                return;
+            }
+
+            this.renderVersion(manual ? 'Up to date' : '');
+            if (manual) this.showToast(`You're on the latest version (v${APP_VERSION})`);
+        });
+    },
+
+    // Last resort for a device still serving an old cache: bin every cache
+    // and reload. The session is in localStorage, so nothing is lost.
+    forceReload() {
+        const cleared = 'caches' in window
+            ? caches.keys().then(keys => Promise.all(keys.map(key => caches.delete(key)))).catch(() => {})
+            : Promise.resolve();
+
+        cleared.then(() => {
+            this.hasPendingRefresh = true;
+            this.persistSession();
+            window.location.reload();
+        });
     },
 
     // ==========================================
@@ -175,6 +267,7 @@ const App = {
         });
 
         document.getElementById('start-session-btn').addEventListener('click', () => this.startSession());
+        document.getElementById('version-badge').addEventListener('click', () => this.checkForUpdate(true));
 
         // Attendance
         document.getElementById('add-new-player-btn').addEventListener('click', () => this.addPlayerMidSession());
@@ -586,50 +679,188 @@ const App = {
     },
 
     // ==========================================
+    // 🔑 PAIRING / OPPONENT HISTORY INDEX
+    // ==========================================
+    // Rebuilt from this.rounds before every search, so it always matches the
+    // real match log — including after an Undo.
+    buildHistoryIndex() {
+        const index = {
+            roundNumber: Math.max(this.currentRound, this.rounds.length + 1),
+            partnerCount: {},
+            partnerLast: {},
+            opponentCount: {},
+            opponentLast: {}
+        };
+
+        const bump = (counts, last, a, b, roundNumber) => {
+            if (!counts[a]) counts[a] = {};
+            if (!last[a]) last[a] = {};
+            counts[a][b] = (counts[a][b] || 0) + 1;
+            last[a][b] = Math.max(last[a][b] || 0, roundNumber);
+        };
+
+        this.rounds.forEach((round, i) => {
+            const roundNumber = round.roundNumber || i + 1;
+            (round.matches || []).forEach(match => {
+                if (match.type === 'doubles') {
+                    [match.team1, match.team2].forEach(team => {
+                        if (!team || team.length !== 2) return;
+                        bump(index.partnerCount, index.partnerLast, team[0], team[1], roundNumber);
+                        bump(index.partnerCount, index.partnerLast, team[1], team[0], roundNumber);
+                    });
+                }
+                (match.team1 || []).forEach(p1 => {
+                    (match.team2 || []).forEach(p2 => {
+                        bump(index.opponentCount, index.opponentLast, p1, p2, roundNumber);
+                        bump(index.opponentCount, index.opponentLast, p2, p1, roundNumber);
+                    });
+                });
+            });
+        });
+
+        return index;
+    },
+
+    // ==========================================
+    // 🔑 COST MODEL
+    // ==========================================
+    // Costs are vectors compared LEXICOGRAPHICALLY: an earlier entry always
+    // outranks every later one. That is what keeps partnerships unique — a
+    // repeated pairing can never be traded away for fresher opponents, no
+    // matter how many opponent repeats the trade would save.
+    //
+    //   [0] partner repeats   sum of count^2 over the round's partnerships
+    //   [1] partner recency   how recently those repeats last happened
+    //   [2] opponent repeats  sum of count^2 over the round's opponent pairs
+    //   [3] opponent recency  how recently those repeats last happened
+    //
+    // count^2 rather than count spreads repeats around: pairing two different
+    // duos for a 2nd time (1+1) beats pairing one duo for a 3rd time (4).
+    RECENCY_SPAN: 8,
+
+    zeroCost() {
+        return [0, 0, 0, 0];
+    },
+
+    addCost(a, b) {
+        return [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]];
+    },
+
+    compareCost(a, b) {
+        for (let i = 0; i < a.length; i++) {
+            if (a[i] !== b[i]) return a[i] - b[i];
+        }
+        return 0;
+    },
+
+    isZeroCost(cost) {
+        return cost.every(value => value === 0);
+    },
+
+    recencyWeight(lastRound, currentRound) {
+        if (!lastRound) return 0;
+        const gap = Math.max(1, currentRound - lastRound);
+        return gap >= this.RECENCY_SPAN ? 0 : this.RECENCY_SPAN - gap;
+    },
+
+    addPartnershipCost(cost, index, p1, p2) {
+        const count = index.partnerCount[p1]?.[p2] || 0;
+        if (!count) return;
+        cost[0] += count * count;
+        cost[1] += this.recencyWeight(index.partnerLast[p1]?.[p2], index.roundNumber);
+    },
+
+    addOpponentCost(cost, index, p1, p2) {
+        const count = index.opponentCount[p1]?.[p2] || 0;
+        if (!count) return;
+        cost[2] += count * count;
+        cost[3] += this.recencyWeight(index.opponentLast[p1]?.[p2], index.roundNumber);
+    },
+
+    doublesMatchCost(index, team1, team2) {
+        const cost = this.zeroCost();
+        this.addPartnershipCost(cost, index, team1[0], team1[1]);
+        this.addPartnershipCost(cost, index, team2[0], team2[1]);
+        team1.forEach(p1 => team2.forEach(p2 => this.addOpponentCost(cost, index, p1, p2)));
+        return cost;
+    },
+
+    singlesMatchCost(index, p1, p2) {
+        const cost = this.zeroCost();
+        this.addOpponentCost(cost, index, p1, p2);
+        return cost;
+    },
+
+    // ==========================================
     // 🔑 FAIR REST SELECTION
     // ==========================================
-    selectRestingPlayers(available, restCount) {
-        if (restCount <= 0) return [];
+    // Every group this returns is EQUALLY fair to sit out, so the caller can
+    // choose between them on pairing freshness without trading away fairness.
+    // Swapping resters helps most when few people are on court (6 players on
+    // 1 court live or die by who sits out); with a big playing group it buys
+    // little and every extra group costs another search.
+    restCandidateLimit(playingCount) {
+        if (playingCount <= 8) return 24;
+        if (playingCount <= 12) return 12;
+        return 6;
+    },
 
-        let requested = available.filter(p => this.restRequests.has(p));
-        let remaining = available.filter(p => !this.restRequests.has(p));
+    restFairnessKey(name) {
+        const s = this.playerStats[name] || { gamesPlayed: 0, restCount: 0, consecutivePlayed: 0 };
+        return [
+            // new/returning players (0 games) sort last, so they play first
+            s.gamesPlayed === 0 ? 1 : 0,
+            -(s.gamesPlayed - s.restCount),   // most overdue for a rest first
+            -s.consecutivePlayed              // longest unbroken run first
+        ];
+    },
+
+    buildRestCandidates(available, restCount) {
+        if (restCount <= 0) return [[]];
+        const limit = this.restCandidateLimit(available.length - restCount);
+
+        const requested = available.filter(p => this.restRequests.has(p));
+        if (requested.length >= restCount) {
+            return [this.shuffled(requested).slice(0, restCount)];
+        }
+
+        const pool = available.filter(p => !this.restRequests.has(p));
         let slotsLeft = restCount - requested.length;
 
-        if (slotsLeft <= 0) return requested.slice(0, restCount);
+        const keyed = pool.map(name => ({ name, key: this.restFairnessKey(name) }));
+        keyed.sort((a, b) => this.compareCost(a.key, b.key));
 
-        let scored = remaining.map(name => {
-            const s = this.playerStats[name] || {
-                gamesPlayed: 0, restCount: 0, consecutivePlayed: 0
-            };
-            return {
-                name,
-                gamesPlayed: s.gamesPlayed,
-                restCount: s.restCount,
-                consecutivePlayed: s.consecutivePlayed,
-                // Net play score: higher = more overdue for rest
-                netPlay: s.gamesPlayed - s.restCount,
-                random: Math.random()
-            };
+        // players sharing a fairness key are interchangeable
+        const groups = [];
+        keyed.forEach(entry => {
+            const last = groups[groups.length - 1];
+            if (last && this.compareCost(last.key, entry.key) === 0) last.names.push(entry.name);
+            else groups.push({ key: entry.key, names: [entry.name] });
         });
 
-        scored.sort((a, b) => {
-            // New/returning players (0 games) → BOTTOM (they play first)
-            if (a.gamesPlayed === 0 && b.gamesPlayed > 0) return 1;
-            if (b.gamesPlayed === 0 && a.gamesPlayed > 0) return -1;
+        const forced = [];
+        let boundary = null;
+        for (const group of groups) {
+            if (slotsLeft <= 0) break;
+            if (group.names.length <= slotsLeft) {
+                forced.push(...group.names);
+                slotsLeft -= group.names.length;
+            } else {
+                boundary = { names: group.names, pick: slotsLeft };
+                slotsLeft = 0;
+            }
+        }
 
-            // Most overdue for rest → TOP (they rest)
-            if (a.netPlay !== b.netPlay) return b.netPlay - a.netPlay;
+        if (!boundary) return [[...requested, ...forced]];
 
-            // Most consecutive → TOP
-            if (a.consecutivePlayed !== b.consecutivePlayed)
-                return b.consecutivePlayed - a.consecutivePlayed;
+        // only the group straddling the cut has a genuine choice in it
+        return this.shuffled(this.combinations(boundary.names, boundary.pick))
+            .slice(0, limit)
+            .map(option => [...requested, ...forced, ...option]);
+    },
 
-            // Random tiebreak
-            return a.random - b.random;
-        });
-
-        let autoRest = scored.slice(0, slotsLeft).map(s => s.name);
-        return [...requested, ...autoRest];
+    selectRestingPlayers(available, restCount) {
+        return this.buildRestCandidates(available, restCount)[0] || [];
     },
 
     // ==========================================
@@ -640,6 +871,15 @@ const App = {
             return structuredClone(value);
         }
         return JSON.parse(JSON.stringify(value));
+    },
+
+    shuffled(list) {
+        const arr = [...list];
+        for (let i = arr.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [arr[i], arr[j]] = [arr[j], arr[i]];
+        }
+        return arr;
     },
 
     captureRoundSnapshot() {
@@ -679,103 +919,52 @@ const App = {
         this.persistSession();
     },
 
+    planCourts(playerCount, courts) {
+        const doubles = Math.min(Math.floor(playerCount / 4), courts);
+        const leftoverPlayers = playerCount - (doubles * 4);
+        const leftoverCourts = courts - doubles;
+        const singles = Math.min(Math.floor(leftoverPlayers / 2), leftoverCourts);
+        const slots = (doubles * 4) + (singles * 2);
+        return { doubles, singles, slots, resting: playerCount - slots };
+    },
+
     createRoundSchedule() {
-        let allPresent = [...this.presentPlayers];
-        const courts = this.courts;
+        const allPresent = [...this.presentPlayers];
+        const index = this.buildHistoryIndex();
+        const plan = this.planCourts(allPresent.length, this.courts);
 
-        // Calculate court config
-        let doublesCount = Math.min(Math.floor(allPresent.length / 4), courts);
-        let remPlayers = allPresent.length - (doublesCount * 4);
-        let remCourts = courts - doublesCount;
-        let singlesCount = Math.min(Math.floor(remPlayers / 2), remCourts);
-        let totalSlots = (doublesCount * 4) + (singlesCount * 2);
-        let restCount = allPresent.length - totalSlots;
-
-        // Select who rests
-        let resting = this.selectRestingPlayers(allPresent, restCount);
-        let playing = allPresent.filter(p => !resting.includes(p));
-
-        // Recalculate with actual playing count
-        doublesCount = Math.min(Math.floor(playing.length / 4), courts);
-        remPlayers = playing.length - (doublesCount * 4);
-        remCourts = courts - doublesCount;
-        singlesCount = Math.min(Math.floor(remPlayers / 2), remCourts);
-
-        let actualSlots = (doublesCount * 4) + (singlesCount * 2);
-        if (playing.length > actualSlots) {
-            let extra = this.selectRestingPlayers(
-                playing, playing.length - actualSlots
-            );
-            resting = [...resting, ...extra];
-            playing = playing.filter(p => !resting.includes(p));
+        // Who sits out decides which pairings are even reachable, so try every
+        // equally-fair rest group and keep whichever gives the freshest round.
+        const budget = this.newSearchBudget();
+        let best = null;
+        for (const resting of this.buildRestCandidates(allPresent, plan.resting)) {
+            const playing = allPresent.filter(p => !resting.includes(p));
+            const schedule = this.findBestSchedule(index, playing, plan.doubles, plan.singles, budget);
+            if (!schedule) continue;
+            if (!best || this.compareCost(schedule.cost, best.schedule.cost) < 0) {
+                best = { resting, playing, schedule };
+            }
+            if (this.isZeroCost(best.schedule.cost)) break;
         }
 
-        // Safety
-        if (playing.length < 2 && allPresent.length >= 2) {
-            playing = allPresent.slice(0, 2);
-            resting = allPresent.filter(p => !playing.includes(p));
-            doublesCount = 0;
-            singlesCount = 1;
+        if (best) {
+            return {
+                roundNumber: this.currentRound,
+                matches: best.schedule.matches,
+                resting: best.resting,
+                playing: best.playing
+            };
         }
 
-        const matches = this.createMatches(playing, doublesCount, singlesCount);
-
+        // Safety net: only reached if the exact search ran out of budget.
+        const resting = this.selectRestingPlayers(allPresent, plan.resting);
+        const playing = allPresent.filter(p => !resting.includes(p));
         return {
             roundNumber: this.currentRound,
-            matches,
+            matches: this.buildScheduleGreedy(index, playing, plan.doubles, plan.singles),
             resting,
             playing
         };
-    },
-
-    createMatches(players, doublesCount, singlesCount) {
-        if (doublesCount > 0 && singlesCount === 0 && players.length === doublesCount * 4) {
-            const optimized = this.findBestDoublesSchedule(players, doublesCount);
-            if (optimized) return optimized;
-        }
-
-        if (doublesCount > 0 && singlesCount > 0 &&
-            players.length === (doublesCount * 4) + (singlesCount * 2)) {
-            const optimized = this.findBestMixedSchedule(players, doublesCount, singlesCount);
-            if (optimized) return optimized;
-        }
-
-        // Fallback for uneven player counts
-        const matches = [];
-        let assigned = new Set();
-        let pool = [...players].sort(() => Math.random() - 0.5);
-
-        for (let i = 0; i < doublesCount; i++) {
-            const available = pool.filter(p => !assigned.has(p));
-            const teams = this.formDoublesTeams(available);
-            if (teams) {
-                matches.push({
-                    court: matches.length + 1,
-                    type: 'doubles',
-                    team1: teams.team1,
-                    team2: teams.team2
-                });
-                teams.team1.forEach(p => assigned.add(p));
-                teams.team2.forEach(p => assigned.add(p));
-            }
-        }
-
-        for (let i = 0; i < singlesCount; i++) {
-            const available = pool.filter(p => !assigned.has(p));
-            if (available.length >= 2) {
-                const pair = this.formSinglesMatch(available);
-                matches.push({
-                    court: matches.length + 1,
-                    type: 'singles',
-                    team1: [pair[0]],
-                    team2: [pair[1]]
-                });
-                assigned.add(pair[0]);
-                assigned.add(pair[1]);
-            }
-        }
-
-        return matches;
     },
 
     combinations(arr, k) {
@@ -788,39 +977,6 @@ const App = {
         ];
     },
 
-    partitionIntoFixedGroups(players, groupCount, groupSize) {
-        const pool = [...players].sort();
-        const results = [];
-
-        if (pool.length !== groupCount * groupSize) return results;
-
-        const build = (remaining, groupsLeft, current) => {
-            if (groupsLeft === 0) {
-                if (remaining.length === 0) {
-                    results.push(current.map(group => [...group]));
-                }
-                return;
-            }
-            if (groupsLeft === 1) {
-                if (remaining.length === groupSize) {
-                    build([], 0, [...current, remaining]);
-                }
-                return;
-            }
-
-            const anchor = remaining[0];
-            const rest = remaining.slice(1);
-            for (const combo of this.combinations(rest, groupSize - 1)) {
-                const group = [anchor, ...combo];
-                const left = rest.filter(p => !combo.includes(p));
-                build(left, groupsLeft - 1, [...current, group]);
-            }
-        };
-
-        build(pool, groupCount, []);
-        return results;
-    },
-
     getAllTeamSplits(fourPlayers) {
         const [a, b, c, d] = fourPlayers;
         return [
@@ -830,221 +986,150 @@ const App = {
         ];
     },
 
-    forEachSplitCombination(splitOptions, callback) {
-        const recurse = (idx, current) => {
-            if (idx === splitOptions.length) {
-                callback(current);
+    // ==========================================
+    // 🔑 SCHEDULE SEARCH (branch and bound)
+    // ==========================================
+    // Every way of splitting the playing group across the courts is reachable:
+    // the first still-unassigned player anchors the next match, so each layout
+    // is generated exactly once. Candidates are tried cheapest-first, which
+    // makes the very first complete layout a strong bound — everything that
+    // cannot beat it is pruned, and a zero-repeat layout cuts the branch dead.
+    // One budget covers the whole round, shared across every rest group, so a
+    // big session can never freeze the phone. Running out is safe: the search
+    // always finishes its first cheapest-first dive before the budget applies,
+    // so it still returns a layout — just a less polished one.
+    SEARCH_NODE_BUDGET: 80000,
+    SEARCH_TIME_BUDGET_MS: 500,
+
+    newSearchBudget() {
+        return { nodes: this.SEARCH_NODE_BUDGET, deadline: Date.now() + this.SEARCH_TIME_BUDGET_MS };
+    },
+
+    findBestSchedule(index, players, doublesCount, singlesCount, budget) {
+        if (players.length !== (doublesCount * 4) + (singlesCount * 2)) return null;
+        if (!players.length) return { matches: [], cost: this.zeroCost() };
+
+        budget = budget || this.newSearchBudget();
+        let best = null;
+        const spent = () => best && (budget.nodes <= 0 || Date.now() > budget.deadline);
+
+        const search = (remaining, doublesLeft, singlesLeft, chosen, costSoFar) => {
+            if (!remaining.length) {
+                if (doublesLeft === 0 && singlesLeft === 0 &&
+                    (!best || this.compareCost(costSoFar, best.cost) < 0)) {
+                    best = { matches: chosen.slice(), cost: costSoFar };
+                }
                 return;
             }
-            for (const split of splitOptions[idx]) {
-                recurse(idx + 1, [...current, split]);
-            }
-        };
-        recurse(0, []);
-    },
+            if (spent()) return;
 
-    partneredInLastRound(p1, p2) {
-        if (!this.rounds.length) return false;
-        const last = this.rounds[this.rounds.length - 1];
-        for (const match of last.matches) {
-            if (match.type !== 'doubles') continue;
-            if ((match.team1.includes(p1) && match.team1.includes(p2)) ||
-                (match.team2.includes(p1) && match.team2.includes(p2))) {
-                return true;
-            }
-        }
-        return false;
-    },
+            const anchor = remaining[0];
+            const rest = remaining.slice(1);
+            const candidates = [];
 
-    opposedInLastRound(p1, p2) {
-        if (!this.rounds.length) return false;
-        const last = this.rounds[this.rounds.length - 1];
-        for (const match of last.matches) {
-            const crossed = (match.team1.includes(p1) && match.team2.includes(p2)) ||
-                (match.team1.includes(p2) && match.team2.includes(p1));
-            if (crossed) return true;
-        }
-        return false;
-    },
-
-    sameDoublesMatchAsLastRound(team1, team2) {
-        if (!this.rounds.length) return false;
-        const players = new Set([...team1, ...team2]);
-        const last = this.rounds[this.rounds.length - 1];
-
-        for (const match of last.matches) {
-            if (match.type !== 'doubles') continue;
-            const lastPlayers = new Set([...match.team1, ...match.team2]);
-            if (players.size !== lastPlayers.size) continue;
-            if (![...players].every(p => lastPlayers.has(p))) continue;
-
-            const sameTeams = team1.every(p => match.team1.includes(p)) &&
-                team2.every(p => match.team2.includes(p));
-            const swappedTeams = team1.every(p => match.team2.includes(p)) &&
-                team2.every(p => match.team1.includes(p));
-            if (sameTeams || swappedTeams) return true;
-        }
-        return false;
-    },
-
-    getPartnershipCost(p1, p2) {
-        const count = this.pairingHistory[p1]?.[p2] || 0;
-        let cost = count * count;
-        if (this.partneredInLastRound(p1, p2)) cost += 50;
-        return cost;
-    },
-
-    getOpponentCostBetween(p1, p2) {
-        const count = this.opponentHistory[p1]?.[p2] || 0;
-        let cost = count;
-        if (this.opposedInLastRound(p1, p2)) cost += 10;
-        return cost;
-    },
-
-    getOpponentCost(team1, team2) {
-        let cost = 0;
-        team1.forEach(p1 => {
-            team2.forEach(p2 => {
-                cost += this.getOpponentCostBetween(p1, p2);
-            });
-        });
-        return cost;
-    },
-
-    scoreDoublesMatch(team1, team2) {
-        let score = this.getPartnershipCost(team1[0], team1[1]);
-        score += this.getPartnershipCost(team2[0], team2[1]);
-        score += this.getOpponentCost(team1, team2);
-        if (this.sameDoublesMatchAsLastRound(team1, team2)) score += 500;
-        return score;
-    },
-
-    scoreDoublesConfiguration(matches) {
-        let score = matches.reduce(
-            (total, match) => total + this.scoreDoublesMatch(match.team1, match.team2),
-            0
-        );
-        return score + Math.random() * 0.01;
-    },
-
-    findBestDoublesSchedule(players, matchCount) {
-        const partitions = this.partitionIntoFixedGroups(players, matchCount, 4);
-        if (!partitions.length) return null;
-
-        let bestMatches = null;
-        let bestScore = Infinity;
-
-        for (const groups of partitions) {
-            const splitOptions = groups.map(group => this.getAllTeamSplits(group));
-            this.forEachSplitCombination(splitOptions, splits => {
-                const config = splits.map((teams, i) => ({
-                    court: i + 1,
-                    type: 'doubles',
-                    team1: teams.team1,
-                    team2: teams.team2
-                }));
-                const score = this.scoreDoublesConfiguration(config);
-                if (score < bestScore) {
-                    bestScore = score;
-                    bestMatches = config;
-                }
-            });
-        }
-
-        return bestMatches;
-    },
-
-    findBestMixedSchedule(players, doublesCount, singlesCount) {
-        const singlesSlots = singlesCount * 2;
-        let bestMatches = null;
-        let bestScore = Infinity;
-
-        for (const singlesGroup of this.combinations(players, singlesSlots)) {
-            const remaining = players.filter(p => !singlesGroup.includes(p));
-            const doublesMatches = this.findBestDoublesSchedule(remaining, doublesCount);
-            if (!doublesMatches) continue;
-
-            const singlesPair = this.findBestSinglesPair(singlesGroup);
-            const singlesScore = this.getOpponentCostBetween(singlesPair[0], singlesPair[1]);
-            const totalScore = this.scoreDoublesConfiguration(doublesMatches) + singlesScore;
-
-            if (totalScore < bestScore) {
-                bestScore = totalScore;
-                bestMatches = [
-                    ...doublesMatches,
-                    {
-                        court: doublesCount + 1,
-                        type: 'singles',
-                        team1: [singlesPair[0]],
-                        team2: [singlesPair[1]]
+            if (doublesLeft > 0 && rest.length >= 3) {
+                for (const trio of this.combinations(rest, 3)) {
+                    for (const split of this.getAllTeamSplits([anchor, ...trio])) {
+                        candidates.push({
+                            type: 'doubles',
+                            team1: split.team1,
+                            team2: split.team2,
+                            cost: this.doublesMatchCost(index, split.team1, split.team2)
+                        });
                     }
-                ].map((match, i) => ({ ...match, court: i + 1 }));
-            }
-        }
-
-        return bestMatches;
-    },
-
-    findBestSinglesPair(players) {
-        if (players.length === 2) return players;
-
-        let bestPair = [players[0], players[1]];
-        let bestScore = Infinity;
-
-        for (let i = 0; i < players.length; i++) {
-            for (let j = i + 1; j < players.length; j++) {
-                const score = this.getOpponentCostBetween(players[i], players[j]) + Math.random() * 0.01;
-                if (score < bestScore) {
-                    bestScore = score;
-                    bestPair = [players[i], players[j]];
                 }
             }
-        }
-
-        return bestPair;
-    },
-
-    formDoublesTeams(available) {
-        if (available.length < 4) return null;
-
-        let pairs = [];
-        for (let i = 0; i < available.length; i++) {
-            for (let j = i + 1; j < available.length; j++) {
-                const p1 = available[i];
-                const p2 = available[j];
-                pairs.push({
-                    players: [p1, p2],
-                    score: this.getPartnershipCost(p1, p2)
+            if (singlesLeft > 0) {
+                rest.forEach(opponent => {
+                    candidates.push({
+                        type: 'singles',
+                        team1: [anchor],
+                        team2: [opponent],
+                        cost: this.singlesMatchCost(index, anchor, opponent)
+                    });
                 });
             }
-        }
 
-        pairs.sort((a, b) => a.score - b.score);
+            budget.nodes -= candidates.length;
 
-        let bestTeams = null;
-        let bestScore = Infinity;
+            // cheapest first, ties shuffled so equally fresh rounds still vary
+            candidates.forEach(candidate => { candidate.tiebreak = Math.random(); });
+            candidates.sort((a, b) => this.compareCost(a.cost, b.cost) || a.tiebreak - b.tiebreak);
 
-        for (let i = 0; i < pairs.length; i++) {
-            for (let j = i + 1; j < pairs.length; j++) {
-                const team1 = pairs[i].players;
-                const team2 = pairs[j].players;
+            for (const candidate of candidates) {
+                const nextCost = this.addCost(costSoFar, candidate.cost);
+                // sorted ascending, so once one candidate cannot beat the
+                // incumbent, none of the ones behind it can either
+                if (best && this.compareCost(nextCost, best.cost) >= 0) break;
 
-                if (team1[0] !== team2[0] && team1[0] !== team2[1] &&
-                    team1[1] !== team2[0] && team1[1] !== team2[1]) {
-                    const score = this.scoreDoublesMatch(team1, team2);
-                    if (score < bestScore) {
-                        bestScore = score;
-                        bestTeams = { team1: [...team1], team2: [...team2] };
+                const used = new Set([...candidate.team1, ...candidate.team2]);
+                chosen.push(candidate);
+                search(
+                    rest.filter(p => !used.has(p)),
+                    doublesLeft - (candidate.type === 'doubles' ? 1 : 0),
+                    singlesLeft - (candidate.type === 'singles' ? 1 : 0),
+                    chosen,
+                    nextCost
+                );
+                chosen.pop();
+
+                if (spent()) return;
+            }
+        };
+
+        search(this.shuffled(players), doublesCount, singlesCount, [], this.zeroCost());
+        if (!best) return null;
+
+        return { matches: this.numberCourts(best.matches), cost: best.cost };
+    },
+
+    // doubles courts first, then singles, so court numbers read consistently
+    numberCourts(matches) {
+        return [
+            ...matches.filter(m => m.type === 'doubles'),
+            ...matches.filter(m => m.type === 'singles')
+        ].map((match, i) => ({
+            court: i + 1,
+            type: match.type,
+            team1: [...match.team1],
+            team2: [...match.team2]
+        }));
+    },
+
+    buildScheduleGreedy(index, players, doublesCount, singlesCount) {
+        const matches = [];
+        let pool = this.shuffled(players);
+
+        for (let i = 0; i < doublesCount && pool.length >= 4; i++) {
+            let pick = null;
+            for (const trio of this.combinations(pool.slice(1), 3)) {
+                const four = [pool[0], ...trio];
+                for (const split of this.getAllTeamSplits(four)) {
+                    const cost = this.doublesMatchCost(index, split.team1, split.team2);
+                    if (!pick || this.compareCost(cost, pick.cost) < 0) {
+                        pick = { type: 'doubles', team1: split.team1, team2: split.team2, four, cost };
                     }
                 }
             }
+            if (!pick) break;
+            matches.push(pick);
+            pool = pool.filter(p => !pick.four.includes(p));
         }
 
-        return bestTeams;
-    },
+        for (let i = 0; i < singlesCount && pool.length >= 2; i++) {
+            let pick = null;
+            for (let j = 1; j < pool.length; j++) {
+                const cost = this.singlesMatchCost(index, pool[0], pool[j]);
+                if (!pick || this.compareCost(cost, pick.cost) < 0) {
+                    pick = { type: 'singles', team1: [pool[0]], team2: [pool[j]], cost };
+                }
+            }
+            if (!pick) break;
+            matches.push(pick);
+            pool = pool.filter(p => p !== pick.team1[0] && p !== pick.team2[0]);
+        }
 
-    formSinglesMatch(available) {
-        return this.findBestSinglesPair(available);
+        return this.numberCourts(matches);
     },
 
     // ==========================================
@@ -1354,14 +1439,15 @@ const App = {
         `;
 
         const text = document.createElement('span');
-        text.textContent = 'Update available. Tap Refresh (close other tabs if stuck).';
+        text.textContent = 'Update ready. Tap Refresh to load it.';
 
         const button = document.createElement('button');
         button.className = 'btn btn-primary';
         button.textContent = 'Refresh';
         button.addEventListener('click', () => {
-            worker.postMessage({ type: 'SKIP_WAITING' });
             toast.remove();
+            if (worker) worker.postMessage({ type: 'SKIP_WAITING' });
+            this.forceReload();
         });
 
         toast.appendChild(text);
